@@ -1,12 +1,13 @@
-#!/usr/bin/env python3
-"""Run the rule baseline over a freshly generated synthetic set and print the numbers you'd quote."""
+"""Run the rule baseline over a freshly generated synthetic set and print the numbers you'd quote.
+
+    python -m tshepo.cli.evaluate
+"""
 import argparse
 from collections import Counter
 
-from generator import generate_dataset
-from sms_parser import classify
-
-LABELS = ["genuine_transaction", "suspicious", "noise"]
+from ..data.generator import generate_dataset
+from ..parsing.parser import classify
+from ..config import LABELS
 
 
 def main():

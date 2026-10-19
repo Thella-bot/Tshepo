@@ -1,46 +1,16 @@
-"""Shared helpers for the classifiers: input prep, group split, noise stress test, metrics."""
+"""Dataset splitting and metrics for the classifier experiments."""
 from __future__ import annotations
 
 import json
 import random
-import re
 from collections import Counter
 
-from generator import perturb
-from sms_parser import KNOWN_SENDERS
-
-LABELS = ["genuine_transaction", "suspicious", "noise"]
-L2I = {l: i for i, l in enumerate(LABELS)}
-
-
-def sender_tag(sender):
-    s = (sender or "").strip().upper()
-    if s in KNOWN_SENDERS:
-        return "SNDKNOWN"
-    if s.startswith("+") or s[:3].isdigit():
-        return "SNDPHONE"
-    return "SNDOTHER"  # lookalike or unknown alphanumeric ID
-
-
-def prep(body, sender=None):
-    """Model input: sender-type token + body with digits normalised so formats generalise."""
-    return f"{sender_tag(sender)} " + re.sub(r"\d", "0", " ".join(body.split()))
-
-
-def heavy_noise(rng, s):
-    """Stress test: stack perturbations and drop/swap letters inside words."""
-    for _ in range(3):
-        s = perturb(rng, s)
-    out = []
-    for w in s.split(" "):
-        if len(w) > 4 and w.isalpha() and rng.random() < 0.3:
-            j = rng.randint(1, len(w) - 2)
-            w = w[:j] + w[j + 1:] if rng.random() < 0.5 else w[:j] + w[j + 1] + w[j] + w[j + 2:] if j + 2 <= len(w) else w
-        out.append(w)
-    return " ".join(out)
+from .config import LABELS
 
 
 def group_split(records, test_frac=0.2, seed=0):
+    """Split by user_id, never by message: messages from one user share a spending
+    pattern, so a random per-message split leaks the user across train and test."""
     users = sorted({r["user_id"] for r in records})
     random.Random(seed).shuffle(users)
     test_users = set(users[: int(len(users) * test_frac)])

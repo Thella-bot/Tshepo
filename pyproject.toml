@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tshepo"
+version = "0.1.0"
+description = "SMS-based credit passport for mobile-money users (Lesotho)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "scikit-learn>=1.3",
+    "joblib>=1.3",
+]
+
+[project.optional-dependencies]
+# Only needed for the transformer classifier; the TF-IDF model needs no extra deps.
+transformer = [
+    "torch>=2.0",
+    "transformers>=4.40",
+    "accelerate>=0.30",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+tshepo-generate = "tshepo.cli.generate:main"
+tshepo-evaluate = "tshepo.cli.evaluate:main"
+tshepo-parse = "tshepo.cli.parse_sms:main"
+tshepo-predict = "tshepo.cli.predict:main"
+tshepo-passport = "tshepo.cli.passport:main"
+tshepo-train-tfidf = "tshepo.cli.train_tfidf:main"
+tshepo-train-transformer = "tshepo.cli.train_transformer:main"
+tshepo-train-score = "tshepo.cli.train_score:main"
+
+[tool.setuptools.packages.find]
+include = ["tshepo*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

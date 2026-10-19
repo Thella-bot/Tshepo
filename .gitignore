@@ -1,2 +1,16 @@
-/Tshepo_Application_Draft.docx
-/__pycache__
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Trained artefacts and generated data are rebuildable, do not commit them
+/models/*
+!/models/.gitkeep
+/data/*
+!/data/.gitkeep
+
+# Real user data must never be committed
+data/real_*.jsonl
+data/real_*.csv

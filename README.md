@@ -1,45 +1,129 @@
-# Tshepo - SMS generator + parser (starter)
+# Tshepo - SMS credit passport
 
-Pure Python 3.9+, no dependencies.
+Builds a credit score for someone who has no formal credit history, using only the
+mobile-money and bank SMS alerts they already receive. No app, no data sharing, no
+bank integration: the user's phone is the data source.
 
-    python generator.py --users 200 --seed 42 --out data/synthetic_sms.jsonl --csv
-    python evaluate.py                      # rule-baseline numbers on a fresh synthetic set
-    python sms_parser.py "RK12AB34CD Confirmed. You have received M100.00 from THABO MOKOENA 58123456 on 19/10/26 at 2:15 PM. New M-PESA balance is M900.00." --sender MPESA
+The pipeline is four layers, and each layer can be replaced independently:
 
-## Files
-- generator.py   per-user synthetic streams (genuine / suspicious / noise), running balances, typo and casing noise
-- sms_parser.py  field extraction, scam red-flag rules, classify(), extract_transactions() ledger for the credit score
-- evaluate.py    confusion matrix, scam recall, false-flag rate, field accuracy
+```
+SMS messages  ->  GATE (is this a real transaction?)  ->  LEDGER (structured rows)
+              ->  CASH-FLOW FEATURES  ->  SCORE (300-850) + credit passport
+```
 
-## Added: classifiers and scoring
-- common.py              shared prep, user-level split, noise stress test, metrics
-- train_tfidf.py         TF-IDF (char+word) + logistic regression, and a hybrid that also sees the rule flags;
-                         tests: synthetic, heavy typos, UNSEEN scam types, and `--real your_file.jsonl`
-- train_transformer.py   fine-tunes Davlan/afro-xlmr-base (or xlm-roberta-base). NOT RUN in the authoring sandbox: smoke-test on Colab first
-- ml_classifier.py       load a trained model as the gate: extract_transactions(records, label_fn=load_gate())
-- cashflow.py            20 cash-flow features, balance-chain integrity check, transparent 300-850 scorecard, make_passport()
-- train_score.py         SMS -> gate -> ledger -> features -> scorecard / logistic / boosting, plus a forged-SMS tamper test
+The gate is the only part that classifies text, and it has three interchangeable
+implementations: hand-written rules, TF-IDF + logistic regression (with an optional
+hybrid that also reads the rule flags), and a fine-tuned multilingual transformer.
 
-    pip install scikit-learn numpy scipy joblib
-    python train_tfidf.py && python train_score.py --gate models/hybrid.joblib
+## Quick start
 
-Real-data file format (one JSON per line): {"body": "...", "sender": "MPESA", "label": "genuine_transaction|suspicious|noise"}
+    pip install -r requirements.txt
+    pip install -e .                     # optional: gives you the tshepo-* commands
+
+    python -m tshepo.cli.generate --users 200 --seed 42 --out data/synthetic_sms.jsonl --csv
+    python -m tshepo.cli.evaluate       # rule-baseline numbers on a fresh synthetic set
+    python -m tshepo.cli.parse_sms "RK12AB34CD Confirmed. You have received M100.00 ..." --sender MPESA
+
+## Project structure
+
+    tshepo/
+      config.py            paths, label set
+      textprep.py          model input prep (sender tag + digit normalisation)
+      evaluation.py        user-level split, metrics
+      pipeline.py          end-to-end core: messages -> gate -> ledger -> features -> score
+      data/
+        generator.py       synthetic SMS streams (genuine / suspicious / noise) with chained balances
+      parsing/
+        parser.py          regex field extraction + scam red flags (the baseline)
+      features/
+        cashflow.py        20 cash-flow features, balance-chain integrity, transparent scorecard
+      models/
+        tfidf.py           TF-IDF (char+word) + logistic regression, and the hybrid variant
+        transformer.py     fine-tuned multilingual transformer, same interface as tfidf
+        scoring.py         fitted score models (logistic regression, gradient boosting)
+        gate.py            the gate interface: label_fn(body, sender) -> label
+      cli/
+        generate.py        write a synthetic dataset
+        evaluate.py        rule baseline report
+        parse_sms.py       parse one SMS
+        predict.py         classify messages with rules / tfidf / hybrid / transformer
+        passport.py        build a credit passport per user from a message file
+        train_tfidf.py     train the TF-IDF and hybrid classifiers
+        train_transformer.py  fine-tune the transformer
+        train_score.py     train the cash-flow scoring model end to end
+    tests/                 pytest suite (parser, generator, features, pipeline)
+    data/                  generated or hand-labelled message files (gitignored)
+    models/                trained artefacts (gitignored)
+    docs/                  architecture notes and the application draft
+
+## Training the models
+
+    pip install -r requirements.txt
+    python -m tshepo.cli.train_tfidf                     # -> models/tfidf.joblib, models/hybrid.joblib
+    python -m tshepo.cli.train_score --gate models/hybrid.joblib   # -> models/score_gb.joblib
+
+The TF-IDF script also runs two stress tests: a heavy-typo version of the test set,
+and a set of scam types that were never in training (to see if the model generalises
+or only memorised).
+
+### Transformer (optional, needs torch + transformers)
+
+    pip install torch transformers accelerate
+    # GPU (Colab T4 or better):
+    python -m tshepo.cli.train_transformer --model Davlan/afro-xlmr-base --users 1500 --epochs 3
+    # CPU (small model, fewer users - minutes, not hours):
+    python -m tshepo.cli.train_transformer --model distilbert-base-multilingual-cased \
+        --users 300 --epochs 1 --batch 16 --device cpu
+
+Model choices: `Davlan/afro-xlmr-base` (XLM-R adapted to African languages, reported
+to include Sesotho) is the first choice; `xlm-roberta-base` is the general fallback;
+`distilbert-base-multilingual-cased` is the CPU-friendly one.
+
+## Using a model as the gate
+
+    from tshepo.models.gate import load_gate
+    from tshepo.pipeline import score_user
+
+    label_fn = load_gate("models/hybrid.joblib")
+    passport = score_user(messages, label_fn=label_fn, user_label="U0042")
+
+or from the command line:
+
+    python -m tshepo.cli.predict "Your PIN is required to..." --sender +26658123456 --model hybrid
+    python -m tshepo.cli.passport --file data/synthetic_sms.jsonl --gate models/hybrid.joblib
+
+## Real-data file format
+
+One JSON per line:
+
+    {"body": "...", "sender": "MPESA", "label": "genuine_transaction|suspicious|noise"}
+
+Then:
+
+    python -m tshepo.cli.train_tfidf --real data/real_labelled.jsonl
+    python -m tshepo.cli.train_transformer --real data/real_labelled.jsonl
 
 ## Be honest about the numbers
-The templates only approximate real operator formats, so ~99% on synthetic data is optimistic
-(the parser was written against the same templates). The remaining errors are mostly typos in
-keywords like "balance", which is exactly what the ML classifier is for.
+
+The templates only approximate real operator formats, so ~99% on synthetic data is
+optimistic (the parser was written against the same templates). The remaining errors
+are mostly typos in keywords like "balance", which is exactly what the ML classifier
+is for. The real number that matters is the one on held-out REAL messages.
 
 ## Next steps
-1. Add 50-200 REAL anonymised messages (your own + volunteers). Mask names, phone numbers, refs.
-   Hold them out as the test set. Adjust templates and regexes to match real formats.
+
+1. Add 50-200 REAL anonymised messages (your own + volunteers). Mask names, phone
+   numbers, refs. Hold them out as the test set. Adjust templates and regexes to
+   match real formats.
 2. Have a Sesotho speaker review the scam/noise wording; add more code-switched variants.
-3. Train a TF-IDF (char n-gram) + logistic regression baseline, then a small multilingual transformer.
-   Report the lift over the rules on the real hold-out set.
-4. Feed extract_transactions() output into the cash-flow features (income regularity, inflow/outflow
-   ratio, balance volatility, loan repayments) and fit the scoring model.
+3. Report the lift of TF-IDF/transformer over the rules on the real hold-out set.
+4. Get anonymised repayment outcomes from a lender/SACCO partner and refit the
+   scoring model on them.
 
 ## Scoring caveat
-Default outcomes in train_score.py are SYNTHETIC (a hidden reliability variable drives both behaviour and outcome).
-The AUC proves the pipeline runs end to end, not that the score predicts real defaults. Scorecard weights are hand-set.
-To make it real: get anonymised repayment outcomes from a lender/SACCO partner and refit.
+
+Default outcomes in the training data are SYNTHETIC (a hidden reliability variable
+drives both behaviour and outcome). The AUC proves the pipeline runs end to end, not
+that the score predicts real defaults. Scorecard weights are hand-set.
+
+See `docs/ARCHITECTURE.md` for how the layers fit together.

@@ -1,9 +1,8 @@
-#!/usr/bin/env python3
-"""
-End-to-end: synthetic SMS -> classifier gate -> ledger -> cash-flow features -> score.
+"""End-to-end: synthetic SMS -> classifier gate -> ledger -> cash-flow features -> score.
 
-    python train_score.py                  # rules as the gate
-    python train_score.py --gate models/hybrid.joblib
+    python -m tshepo.cli.train_score                  # rules as the gate
+    python -m tshepo.cli.train_score --gate models/hybrid.joblib
+    python -m tshepo.cli.train_score --gate models/transformer --device cpu
 
 Outcomes (`defaulted`) are SYNTHETIC: they come from a hidden reliability variable that also shapes the
 simulated behaviour. A good AUC here only proves the pipeline works. It says nothing about real default risk.
@@ -12,30 +11,21 @@ import argparse
 import json
 import random
 from collections import defaultdict
+from datetime import datetime
 
 import numpy as np
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, roc_curve
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import make_pipeline
 
-from cashflow import FEATURES, band, build_features, make_passport, scorecard
-from generator import build, phone, ref, stamp_mpesa
-from sms_parser import classify, extract_transactions
-from datetime import datetime
+from ..data.generator import build, phone, ref, stamp_mpesa
+from ..features.cashflow import FEATURES, band, build_features, make_passport, scorecard
+from ..models.scoring import ScoreModel
+from ..parsing.parser import extract_transactions
+from ..pipeline import group_by_user, ledger_for
 
 
 def ks(y, s):
     fpr, tpr, _ = roc_curve(y, s)
     return float((tpr - fpr).max())
-
-
-def by_user(records):
-    d = defaultdict(list)
-    for r in records:
-        d[r["user_id"]].append(r)
-    return d
 
 
 def forge(rng, user_recs, n, skilled):
@@ -57,8 +47,7 @@ def forge(rng, user_recs, n, skilled):
 
 def naive_rows(recs):
     """No shield: trust anything that parses like a transaction."""
-    rows = extract_transactions(recs, label_fn=lambda b, s: "genuine_transaction")
-    return rows
+    return extract_transactions(recs, label_fn=lambda b, s: "genuine_transaction")
 
 
 def main():
@@ -66,15 +55,20 @@ def main():
     ap.add_argument("--users", type=int, default=1500)
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--gate", default=None, help="path to a joblib text classifier to gate messages (default: rules)")
+    ap.add_argument("--transformer", default=None, help="path to a fine-tuned transformer dir to gate messages")
+    ap.add_argument("--out", default="models/score_gb.joblib", help="where to save the fitted scoring model")
     a = ap.parse_args()
 
     label_fn = None
     if a.gate:
-        from ml_classifier import load_gate
+        from ..models.gate import load_gate
         label_fn = load_gate(a.gate)
+    elif a.transformer:
+        from ..models.gate import load_transformer_gate
+        label_fn = load_transformer_gate(a.transformer)
 
     records, users = build(n_users=a.users, seed=a.seed, events=(30, 70), credit_signal=True)
-    recs_by_user = by_user(records)
+    recs_by_user = group_by_user(records)
     X, y, uids = [], [], []
     for u in users:
         rows = extract_transactions(recs_by_user[u["user_id"]], label_fn=label_fn)
@@ -83,7 +77,7 @@ def main():
         y.append(u["defaulted"])
         uids.append(u["user_id"])
     X, y = np.array(X), np.array(y)
-    print(f"{len(y)} users, synthetic default rate {y.mean():.1%}, gate = {a.gate or 'rules'}")
+    print(f"{len(y)} users, synthetic default rate {y.mean():.1%}, gate = {a.gate or a.transformer or 'rules'}")
 
     idx = list(range(len(y)))
     random.Random(0).shuffle(idx)
@@ -93,9 +87,9 @@ def main():
     # 1) transparent scorecard (no training)
     card = np.array([scorecard(dict(zip(FEATURES, row)))["score"] for row in X])
     # 2) logistic regression, 3) gradient boosting
-    lr = make_pipeline(StandardScaler(), LogisticRegression(C=0.5, max_iter=2000)).fit(X[tr], y[tr])
-    gb = HistGradientBoostingClassifier(max_depth=3, learning_rate=0.06, max_iter=150, random_state=0).fit(X[tr], y[tr])
-    p_lr, p_gb = lr.predict_proba(X[te])[:, 1], gb.predict_proba(X[te])[:, 1]
+    lr = ScoreModel.fit(X[tr], y[tr], kind="lr")
+    gb = ScoreModel.fit(X[tr], y[tr], kind="gb")
+    p_lr, p_gb = lr.estimator.predict_proba(X[te])[:, 1], gb.estimator.predict_proba(X[te])[:, 1]
 
     print("\nHeld-out users (synthetic outcomes):")
     print(f"{'model':32}{'AUC':>8}{'KS':>8}")
@@ -111,9 +105,13 @@ def main():
             print(f"  {band(lo):10} score {lo:>3}-{hi:<3} n={m.sum():>4}  default rate {yt[m].mean():6.1%}")
 
     print("\nMost important features (logistic regression, standardised coefficients):")
-    coef = lr[-1].coef_[0]
+    coef = lr.estimator[-1].coef_[0]
     for i in np.argsort(-np.abs(coef))[:6]:
         print(f"  {FEATURES[i]:22} {coef[i]:+.2f}  ({'raises' if coef[i] > 0 else 'lowers'} default risk)")
+
+    saved = gb.save(a.out)
+    print(f"\nSaved fitted scoring model -> {saved}")
+    print(f"metadata: {gb.metadata}")
 
     # ---- Does the shield protect the score? Forged inflows added to the TEST users.
     rng = random.Random(5)

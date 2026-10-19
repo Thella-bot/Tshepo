@@ -11,11 +11,11 @@ This is the BASELINE. The plan is to train a text classifier on top and show the
 over these rules on held-out REAL messages. Rules are tolerant of case, spacing and typos
 in the surrounding text, but they are tuned to the synthetic templates - treat any
 accuracy on synthetic data as optimistic.
+
+CLI: python -m tshepo.cli.parse_sms "<message>" --sender MPESA
 """
 from __future__ import annotations
 
-import argparse
-import json
 import re
 from dataclasses import asdict, dataclass
 from typing import Optional
@@ -227,17 +227,3 @@ def extract_transactions(records, label_fn=None):
         d["user_id"] = r.get("user_id")
         rows.append(d)
     return rows
-
-
-def main():
-    ap = argparse.ArgumentParser(description="Parse and classify one SMS")
-    ap.add_argument("body")
-    ap.add_argument("--sender", default=None)
-    a = ap.parse_args()
-    res = classify(a.body, a.sender)
-    res["parsed"] = asdict(res["parsed"])
-    print(json.dumps(res, indent=2, ensure_ascii=False))
-
-
-if __name__ == "__main__":
-    main()

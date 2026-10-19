@@ -1,0 +1,13 @@
+# Core (rule baseline, TF-IDF classifier, cash-flow scoring)
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
+joblib>=1.3
+
+# Transformer classifier only - the TF-IDF model runs without these
+# torch>=2.0
+# transformers>=4.40
+# accelerate>=0.30
+
+# Tests
+pytest>=8.0

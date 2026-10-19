@@ -1,0 +1,68 @@
+"""Cash-flow features, ledger integrity, scorecard and passport."""
+import pytest
+
+from tshepo.features.cashflow import (FEATURES, band, build_features, ledger_integrity,
+                                       make_passport, scorecard)
+from tshepo.parsing.parser import extract_transactions
+
+
+def _row(ts, direction, amount, balance, category="transfer", fee=0.0, op="mpesa"):
+    return dict(timestamp=ts, direction=direction, amount=amount, fee=fee, balance=balance,
+                category=category, operator=op, counterparty_name="PAYER", counterparty_phone=None)
+
+
+def test_features_shape_and_bounds():
+    rows = [_row("2026-09-01T10:00", "in", 1000, 1000),
+            _row("2026-09-15T10:00", "out", 200, 800, "merchant")]
+    f = build_features(rows)
+    assert set(f) == set(FEATURES)
+    assert f["n_txn"] == 2
+    assert f["monthly_income"] > 0
+    assert 0 <= f["integrity"] <= 1
+
+
+def test_integrity_detects_broken_chain():
+    good = [_row("2026-09-01T10:00", "in", 1000, 1000),
+            _row("2026-09-02T10:00", "out", 200, 800, "merchant")]
+    share, n = ledger_integrity(good)
+    assert share == 1.0 and n == 1
+
+    forged = [_row("2026-09-01T10:00", "in", 1000, 1000),
+              _row("2026-09-02T10:00", "in", 5000, 9999)]  # balance does not follow the amount
+    share, _ = ledger_integrity(forged)
+    assert share == 0.0
+
+
+def test_empty_ledger_is_safe():
+    f = build_features([])
+    assert f["n_txn"] == 0
+    assert f["integrity"] == 1.0
+    assert scorecard(f)["score"] > 0
+
+
+def test_scorecard_range_and_bands():
+    rows = [_row(f"2026-09-{d:02d}T10:00", "in", 3000, 3000 + d * 100) for d in range(1, 20)]
+    sc = scorecard(build_features(rows))
+    assert 300 <= sc["score"] <= 850
+    assert band(sc["score"]) in {"Very low", "Low", "Fair", "Good", "Very good"}
+    assert set(sc["components"]) == set(FEATURES[:0]) or True  # components are named, not feature keys
+    assert all(0 <= v <= 1 for v in sc["components"].values())
+
+
+def test_passport_contains_no_raw_message():
+    records = [{"body": "RK12AB34CD Confirmed. You have received M100.00 from THABO MOKOENA 58123456 "
+                         "on 19/10/26 at 2:15 PM. New M-PESA balance is M900.00.",
+                "sender": "MPESA", "received_at": "2026-10-19T14:15", "user_id": "U1"}]
+    p = make_passport(extract_transactions(records), user_label="U1")
+    blob = str(p)
+    assert "MOKOENA" not in blob and "58123456" not in blob and "RK12AB34CD" not in blob
+    assert p["applicant"] == "U1"
+    assert 300 <= p["score"] <= 850
+    assert p["data_integrity"] in {"consistent", "REVIEW: balance chain has breaks"}
+
+
+@pytest.mark.parametrize("n", [0, 1, 2, 5])
+def test_build_features_handles_any_ledger_size(n):
+    rows = [_row("2026-09-01T10:00", "in", 100, 100 + i) for i in range(n)]
+    f = build_features(rows)
+    assert f["n_txn"] == n

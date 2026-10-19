@@ -1,64 +1,25 @@
-#!/usr/bin/env python3
-"""
-TF-IDF + logistic regression SMS classifier, compared with the rule baseline.
+"""TF-IDF + logistic regression SMS classifier, compared with the rule baseline.
 
-    python train_tfidf.py                       # synthetic train/test + noise stress test
-    python train_tfidf.py --real data/real_labelled.jsonl
+    python -m tshepo.cli.train_tfidf                       # synthetic train/test + noise stress test
+    python -m tshepo.cli.train_tfidf --real data/real_labelled.jsonl
         # real file: one JSON per line with {"body": ..., "sender": ..., "label": genuine_transaction|suspicious|noise}
         # evaluates the model trained on synthetic data against YOUR real messages (the number that matters)
+
+The hybrid variant sees the rule engine's flags as extra tokens, so it can learn from
+them and override them when the text contradicts the rule.
 """
 import argparse
 import os
 import random
 
-import joblib
 import numpy as np
-from scipy.sparse import hstack
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
 
-from common import LABELS, group_split, heavy_noise, load_jsonl, prep, print_table, report
-from generator import build
-from sms_parser import classify, parse, red_flags
-
-
-def rule_tokens(body, sender):
-    """Turn the rule engine's output into tokens so the model can use (and override) it."""
-    p = parse(body, sender)
-    f = red_flags(body, sender, p)
-    toks = [f"FLAG_{k}" for k in f] + [f"RULESCORE{min(sum(f.values()), 6)}"]
-    if p.is_transaction:
-        toks.append("PARSED_TXN")
-    return " ".join(toks)
-
-
-class TfidfSmsClassifier:
-    def __init__(self, use_rules=False):
-        self.use_rules = use_rules
-        self.char = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 5), min_df=2, sublinear_tf=True, lowercase=True)
-        self.word = TfidfVectorizer(analyzer="word", ngram_range=(1, 2), min_df=2, sublinear_tf=True, lowercase=True,
-                                    token_pattern=r"[A-Za-z0-9_\-\*#:/\.]+")
-        self.clf = LogisticRegression(C=8.0, max_iter=2000, class_weight="balanced")
-
-    def _text(self, b, s):
-        t = prep(b, s)
-        return t + " " + rule_tokens(b, s) if self.use_rules else t
-
-    def _x(self, texts, fit=False):
-        if fit:
-            return hstack([self.char.fit_transform(texts), self.word.fit_transform(texts)]).tocsr()
-        return hstack([self.char.transform(texts), self.word.transform(texts)]).tocsr()
-
-    def fit(self, bodies, senders, labels):
-        self.clf.fit(self._x([self._text(b, s) for b, s in zip(bodies, senders)], fit=True), labels)
-        return self
-
-    def predict_proba(self, bodies, senders):
-        p = self.clf.predict_proba(self._x([self._text(b, s) for b, s in zip(bodies, senders)]))
-        return p, list(self.clf.classes_)
-
-    def predict(self, bodies, senders):
-        return list(self.clf.predict(self._x([self._text(b, s) for b, s in zip(bodies, senders)])))
+from ..config import LABELS, ensure_dir, model_path
+from ..data.generator import build
+from ..evaluation import group_split, load_jsonl, print_table, report
+from ..models.tfidf import TfidfSmsClassifier
+from ..parsing.parser import classify
+from ..textprep import heavy_noise
 
 
 def rules_predict(recs):
@@ -77,7 +38,9 @@ def main():
     tr, te = group_split(recs, 0.2, seed=a.seed)
     print(f"train {len(tr)} msgs / test {len(te)} msgs (split by user, no leakage)")
 
-    fit = lambda rows, rules: TfidfSmsClassifier(rules).fit([r["body"] for r in rows], [r["sender"] for r in rows], [r["label"] for r in rows])
+    fit = lambda rows, rules: TfidfSmsClassifier(rules).fit([r["body"] for r in rows],
+                                                            [r["sender"] for r in rows],
+                                                            [r["label"] for r in rows])
     model, hybrid = fit(tr, False), fit(tr, True)
     pred = lambda m, d: m.predict([r["body"] for r in d], [r["sender"] for r in d])
 
@@ -118,10 +81,14 @@ def main():
     top = np.argsort(model.clf.coef_[ci])[-12:][::-1]
     print("\nTop features pushing toward 'suspicious':", ", ".join(str(t) for t in names[top]))
 
-    os.makedirs(os.path.dirname(a.out), exist_ok=True)
-    joblib.dump(model, a.out)
-    joblib.dump(hybrid, a.out.replace('tfidf', 'hybrid'))
-    print(f"\nSaved {a.out} and {a.out.replace('tfidf', 'hybrid')}")
+    out = model_path(a.out)
+    ensure_dir(os.path.dirname(out))
+    import joblib
+    joblib.dump(model, out)
+    hybrid_out = out.replace("tfidf", "hybrid")
+    joblib.dump(hybrid, hybrid_out)
+    print(f"\nSaved {out} and {hybrid_out}")
+    print("Label order:", list(model.clf.classes_), "| labels:", LABELS)
 
 
 if __name__ == "__main__":
