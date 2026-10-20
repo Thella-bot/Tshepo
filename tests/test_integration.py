@@ -72,3 +72,11 @@ def test_metrics_endpoint():
     assert r.status_code == 200
     assert "tshepo_http_requests_total" in r.text
     assert r.headers["content-type"].startswith("text/plain")
+
+
+def test_version_endpoint():
+    client = TestClient(app)
+    r = client.get("/version")
+    assert r.status_code == 200
+    assert r.json()["service"] == "tshepo"
+    assert r.json()["version"] == "0.2.0"

@@ -1,0 +1,45 @@
+version: "3.8"
+
+services:
+  tshepo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tshepo
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - TSHEPO_LOG_LEVEL=INFO
+      - TSHEPO_JSON_LOGS=1
+      - TSHEPO_API_KEY=${TSHEPO_API_KEY:-changeme-in-production}
+      - TSHEPO_MAX_BODY_LEN=4096
+      - TSHEPO_RATE_MAX=120
+      - TSHEPO_MODELS_DIR=/app/models
+    volumes:
+      - ./models:/app/models:ro
+      - ./data:/app/data:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "from tshepo.api import app; from fastapi.testclient import TestClient; assert TestClient(app).get('/health').status_code == 200"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  tshepo-lint:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tshepo-lint
+    command: >
+      sh -c "pip install pyflakes mypy pytest hypothesis
+             && python -m pyflakes tshepo tests
+             && python -m mypy tshepo/
+             && python -m pytest tests -q"
+    volumes:
+      - .:/app
+      - /app/__pycache__
+      - /app/tshepo/__pycache__
+      - /app/tests/__pycache__
+    depends_on:
+      - tshepo

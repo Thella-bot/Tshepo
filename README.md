@@ -134,10 +134,18 @@ Or with Docker:
     docker build -t tshepo .
     docker run -e TSHEPO_API_KEY=<strong-key> -p 8080:8080 tshepo
 
+For local development with docker-compose:
+
+    docker-compose up --build
+
+The compose file also includes a `tshepo-lint` service that runs pyflakes,
+mypy and pytest inside the container.
+
 Endpoints:
 
 * `GET /health` — readiness probe (no auth). Returns `ok=true` only when all
   subsystems are healthy, plus circuit-breaker state.
+* `GET /version` — service version and build info (no auth).
 * `GET /metrics` — Prometheus metrics (no auth).
 * `POST /predict` — classify one message (API key required when
   `TSHEPO_API_KEY` is set).

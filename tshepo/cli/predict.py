@@ -7,22 +7,32 @@
 """
 import argparse
 import json
+from typing import Callable, Optional
 
 from ..config import LABELS, model_path
 from ..evaluation import load_jsonl
 from ..models.gate import load_gate, load_transformer_gate
 from ..parsing.parser import classify
+from ..resilience import CircuitBreaker, fallback_gate
+
+GateFn = Callable[[str, Optional[str]], str]
 
 
-def build_model(name, path=None):
+def build_model(name: str, path: Optional[str] = None) -> GateFn:
+    """Return a gate callable wrapped in a circuit breaker that falls back to
+    the zero-dependency rule gate on repeated model failures."""
     if name == "rules":
-        return lambda body, sender: classify(body, sender)["label"]
-    if name == "transformer":
-        return load_transformer_gate(path or "models/transformer")
-    return load_gate(path or model_path(f"models/{name}.joblib"))
+        base: GateFn = lambda body, sender: classify(body, sender)["label"]
+    elif name == "transformer":
+        base = load_transformer_gate(path or "models/transformer")
+    else:
+        base = load_gate(path or model_path(f"models/{name}.joblib"))
+
+    breaker = CircuitBreaker(failure_threshold=3, cooldown_seconds=15.0)
+    return fallback_gate(base, breaker=breaker)
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("body", nargs="?", help="a single message; omit to read --file")
     ap.add_argument("--file", default=None, help="JSONL file with body/sender/label per line")

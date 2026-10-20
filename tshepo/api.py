@@ -41,6 +41,11 @@ from .security import RateLimitExceeded, validate_message, validate_records
 
 logger = get_logger("api")
 
+try:
+    from . import __version__  # noqa: WPS433
+except ImportError:  # pragma: no cover
+    __version__ = "0.0.0"
+
 app = FastAPI(
     title="Tshepo SMS Credit Passport",
     version="0.2.0",
@@ -234,6 +239,12 @@ async def _trace(request: Request, call_next: Callable[[Request], Any]) -> Any:
 async def metrics() -> PlainTextResponse:
     """Prometheus metrics endpoint."""
     return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/version")
+async def version() -> dict[str, str]:
+    """Service version and build info."""
+    return {"version": __version__, "service": "tshepo"}
 
 
 @app.get("/health")
