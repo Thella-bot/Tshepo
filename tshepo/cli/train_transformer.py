@@ -79,7 +79,7 @@ def main():
     class Sms(Dataset):
         def __init__(self, rows, tok):
             self.enc = tok([prep(r["body"], r["sender"]) for r in rows],
-                           truncation=True, max_length=a.max_len)
+                           truncation=True, max_length=a.max_len, padding="max_length")
             self.y = [L2I[r["label"]] for r in rows]
 
         def __len__(self):

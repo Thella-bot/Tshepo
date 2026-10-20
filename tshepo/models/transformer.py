@@ -11,8 +11,14 @@ from __future__ import annotations
 
 import os
 
+import torch
+
 from ..config import LABELS, L2I, model_path
+from ..logging import get_logger
+from ..security import _confine
 from ..textprep import prep
+
+logger = get_logger("models.transformer")
 
 
 class TransformerSmsClassifier:
@@ -25,10 +31,9 @@ class TransformerSmsClassifier:
 
     @classmethod
     def load(cls, path="models/transformer", device=None):
-        import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-        path = model_path(path)
+        path = _confine(path, os.path.dirname(model_path(path)))
         if not os.path.isdir(path):
             raise FileNotFoundError(
                 f"no transformer at {path}. Train one: python -m tshepo.cli.train_transformer")
@@ -36,6 +41,8 @@ class TransformerSmsClassifier:
         tok = AutoTokenizer.from_pretrained(path)
         model = AutoModelForSequenceClassification.from_pretrained(path)
         model.to(device).eval()
+        logger.info("transformer loaded", extra={"model": "transformer", "path": path,
+                                                   "device": device})
         return cls(model=model, tokenizer=tok, device=device)
 
     def predict_proba(self, bodies, senders, batch_size=32):

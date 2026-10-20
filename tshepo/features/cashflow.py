@@ -18,6 +18,10 @@ FEATURES = [
     "net_savings_rate", "bal_mean", "bal_min", "bal_cv", "low_bal_share", "buffer_ratio",
     "n_loan_repay", "airtime_share", "withdrawal_share", "merchant_share",
     "n_unique_payers", "payer_diversity", "top_payer_share", "integrity",
+    # velocity & timing
+    "txn_per_day", "amount_velocity", "night_txn_share", "weekend_txn_share",
+    # regularity & fraud signals
+    "fee_burden", "round_amount_share", "dow_regularity",
 ]
 WEEKS = 13
 
@@ -94,6 +98,43 @@ def build_features(rows):
     f["n_unique_payers"] = len(payers)
     f["payer_diversity"] = len(payers) / max(n_inc, 1)
     f["top_payer_share"] = max(inc_amts) / income if income > 0 else 1.0
+
+    # -------- velocity & timing
+    total_amount = sum(float(r["amount"] or 0) for r in rows)
+    total_fees = sum(float(r.get("fee") or 0) for r in rows)
+    f["txn_per_day"] = f["n_txn"] / f["hist_days"]
+    f["amount_velocity"] = total_amount / f["hist_days"]
+    night = 0
+    weekend = 0
+    dow_counts = {}
+    round_amt = 0
+    for r in rows:
+        t = _ts(r["timestamp"])
+        if t is None:
+            continue
+        dow_counts[t.weekday()] = dow_counts.get(t.weekday(), 0) + 1
+        if t.hour >= 22 or t.hour < 5:
+            night += 1
+        if t.weekday() >= 5:
+            weekend += 1
+        amt = float(r["amount"] or 0)
+        if amt > 0 and (amt % 10 == 0 or amt % 100 == 0):
+            round_amt += 1
+    f["night_txn_share"] = night / f["n_txn"] if f["n_txn"] else 0.0
+    f["weekend_txn_share"] = weekend / f["n_txn"] if f["n_txn"] else 0.0
+    # fee burden: fees as share of outflow
+    f["fee_burden"] = total_fees / (outflow + 1.0)
+    # round amounts prefer round numbers (possible fabricated/fraud signal)
+    f["round_amount_share"] = round_amt / f["n_txn"] if f["n_txn"] else 0.0
+    # day-of-week regularity: entropy-like concentration
+    if dow_counts:
+        total = sum(dow_counts.values())
+        probs = np.array(list(dow_counts.values())) / total
+        entropy = float(-np.sum(probs * np.log(probs + 1e-9)))
+        max_entropy = np.log(7)
+        f["dow_regularity"] = 1.0 - (entropy / max_entropy) if max_entropy > 0 else 0.0
+    else:
+        f["dow_regularity"] = 0.0
 
     last, totals = {}, []
     for r in rows:

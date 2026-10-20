@@ -14,8 +14,11 @@ from scipy.sparse import hstack
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
+from ..logging import get_logger
 from ..parsing.parser import parse, red_flags
 from ..textprep import prep
+
+logger = get_logger("models.tfidf")
 
 
 def rule_tokens(body, sender):

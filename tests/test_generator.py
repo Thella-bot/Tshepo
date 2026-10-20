@@ -43,7 +43,7 @@ def test_scams_use_untrusted_senders_mostly():
 
 def test_credit_signal_shapes_behaviour():
     """Reliable users must earn more and save more than unreliable ones."""
-    records, users = build(n_users=60, seed=31, events=(30, 70), credit_signal=True)
+    records, users = build(n_users=300, seed=31, events=(30, 70), credit_signal=True)
     from tshepo.features.cashflow import build_features
     from tshepo.parsing.parser import extract_transactions
     by_u = {}

@@ -80,56 +80,76 @@ def stamp_bank(dt):
 
 # ---------------------------------------------------------------- genuine
 def build_genuine(rng, op, direction, cat, amt, fee, bal, dt, cp_name, cp_phone, bank_id="BANKA"):
-    """Return (sender, body, shown) where `shown` says which truth fields appear in the text."""
+    """Return (sender, body, shown) where `shown` says which truth fields appear in the text.
+
+    Templates mirror real Lesotho operator formats (M-Pesa and EcoCash) so the
+    classifier trains on realistic text. `shown` still records the truth fields.
+    """
     r, A, B = ref(rng), fmt_amt(amt), fmt_amt(bal)
     F = fmt_amt(fee) if fee is not None else None
     shown = dict(fee=fee, cp_name=None, cp_phone=None)
 
     if op == "mpesa":
-        ts, s = stamp_mpesa(dt), "MPESA"
-        if cat == "transfer" and direction == "out":
-            body = f"{r} Confirmed. M{A} sent to {cp_name} {cp_phone} on {ts}. M-PESA balance is M{B}. Transaction cost, M{F}."
+        ts = stamp_mpesa(dt)
+        # realistic M-Pesa variants
+        if cat == "transfer" and direction == "out" and rng.random() < 0.5:
+            body = (f"{r}. You have paid {A} to {cp_name} {cp_phone} on {ts}. New M-Pesa balance is M{B}.")
             shown.update(cp_name=cp_name, cp_phone=cp_phone)
-        elif cat == "transfer":
-            body = f"{r} Confirmed. You have received M{A} from {cp_name} {cp_phone} on {ts}. New M-PESA balance is M{B}."
+        elif cat == "transfer" and direction == "in":
+            body = (f"{r} Confirmed. You have received M{A} from {cp_name} {cp_phone} on {ts}. "
+                    f"New M-Pesa balance is M{B}.")
             shown.update(cp_name=cp_name, cp_phone=cp_phone)
         elif cat == "merchant":
-            body = f"{r} Confirmed. M{A} paid to {cp_name} on {ts}. M-PESA balance is M{B}. Transaction cost, M{F}."
+            body = (f"{r}. You have paid {A} to {cp_name} on {ts}. New M-Pesa balance is M{B}.")
             shown.update(cp_name=cp_name)
         elif cat == "bill":
-            body = f"{r} Confirmed. M{A} paid to {cp_name} for bill payment on {ts}. M-PESA balance is M{B}. Transaction cost, M{F}."
+            body = (f"{r} Confirmed. M{A} paid to {cp_name} for bill payment on {ts}. "
+                    f"M-Pesa balance is M{B}. Transaction cost, M{F}.")
             shown.update(cp_name=cp_name)
         elif cat == "airtime":
-            body = f"{r} Confirmed. You bought M{A} of airtime on {ts}. M-PESA balance is M{B}."
+            body = (f"{r} Confirmed. You bought M{A} airtime for {cp_phone} on {ts}. "
+                    f"M-Pesa balance is M{B}.")
+            shown.update(cp_phone=cp_phone)
         elif cat == "deposit":
-            body = f"{r} Confirmed. You have received M{A} cash deposit from agent {cp_name} on {ts}. New M-PESA balance is M{B}."
+            body = (f"{r} Confirmed. You have received M{A} cash deposit from agent {cp_name} on {ts}. "
+                    f"New M-Pesa balance is M{B}.")
             shown.update(cp_name=cp_name)
         else:  # withdrawal
-            body = f"{r} Confirmed. You have withdrawn M{A} from agent {cp_name} on {ts}. M-PESA balance is M{B}. Transaction cost, M{F}."
+            body = (f"{r} Confirmed. You have withdrawn M{A} from agent {cp_name} on {ts}. "
+                    f"M-Pesa balance is M{B}. Transaction cost, M{F}.")
             shown.update(cp_name=cp_name)
-        return s, body, shown
+        return "MPESA", body, shown
 
     if op == "ecocash":
-        ts, s = stamp_eco(dt), "ECOCASH"
+        # real EcoCash authentic sender is short code 199
+        s = "199" if rng.random() < 0.6 else "ECOCASH"
+        ts = stamp_eco(dt)
         if cat == "transfer" and direction == "out":
-            body = f"EcoCash: You have sent M{A} to {cp_phone} {cp_name}. Ref {r}. Fee M{F}. New balance M{B}. {ts}"
+            body = (f"EcoCash: Transfer Confirmation.M{A} to {cp_name}. Ref {r}. "
+                    f"Fee M{F}. New balance M{B}. {ts}")
             shown.update(cp_name=cp_name, cp_phone=cp_phone)
         elif cat == "transfer":
-            body = f"EcoCash: You have received M{A} from {cp_phone} {cp_name}. Ref {r}. New balance M{B}. {ts}"
+            body = (f"EcoCash:Cash In Confirmation. Received M{A} from {cp_phone} {cp_name}. "
+                    f"New wallet balance:M {B}. {ts}")
             shown.update(cp_name=cp_name, cp_phone=cp_phone)
         elif cat == "merchant":
-            body = f"EcoCash: You have paid M{A} to {cp_name}. Ref {r}. Fee M{F}. New balance M{B}. {ts}"
+            body = (f"EcoCash: You have paid M{A} to {cp_name}. Ref {r}. Fee M{F}. New balance M{B}. {ts}")
             shown.update(cp_name=cp_name)
         elif cat == "bill":
-            body = f"EcoCash: You have paid M{A} to {cp_name} for bill payment. Ref {r}. Fee M{F}. New balance M{B}. {ts}"
+            body = (f"Ecocash: CashOut Confirmation: M {A} from {cp_name}. Approval Code :{r}. "
+                    f"New Wallet balance: M {B}.")
             shown.update(cp_name=cp_name)
         elif cat == "airtime":
-            body = f"EcoCash: You have bought M{A} airtime. Ref {r}. New balance M{B}. {ts}"
+            body = (f"You have bought M{A} of airtime for {cp_phone} on {ts}. "
+                    f"New balance: M {B}.")
+            shown.update(cp_phone=cp_phone)
         elif cat == "deposit":
-            body = f"EcoCash: Cash in of M{A} received from agent {cp_name}. Ref {r}. New balance M{B}. {ts}"
+            body = (f"EcoCash: Cash in of M{A} received from agent {cp_name}. Ref {r}. "
+                    f"New balance M{B}. {ts}")
             shown.update(cp_name=cp_name)
-        else:
-            body = f"EcoCash: You have withdrawn M{A} at agent {cp_name}. Ref {r}. Fee M{F}. New balance M{B}. {ts}"
+        else:  # withdrawal
+            body = (f"EcoCash: You have withdrawn M{A} at agent {cp_name}. Ref {r}. Fee M{F}. "
+                    f"New balance M{B}. {ts}")
             shown.update(cp_name=cp_name)
         return s, body, shown
 

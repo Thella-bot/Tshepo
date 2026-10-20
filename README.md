@@ -54,7 +54,7 @@ hybrid that also reads the rule flags), and a fine-tuned multilingual transforme
     tests/                 pytest suite (parser, generator, features, pipeline)
     data/                  generated or hand-labelled message files (gitignored)
     models/                trained artefacts (gitignored)
-    docs/                  architecture notes and the application draft
+    docs/                  architecture notes
 
 ## Training the models
 
@@ -127,3 +127,20 @@ drives both behaviour and outcome). The AUC proves the pipeline runs end to end,
 that the score predicts real defaults. Scorecard weights are hand-set.
 
 See `docs/ARCHITECTURE.md` for how the layers fit together.
+
+## Real data (phone exports)
+
+Real operator messages don't match the synthetic templates exactly. Import a phone export
+and the parser adapts to the real formats (short-code senders, amount spacing, merchant IDs,
+failed transactions, etc.):
+
+    python -m tshepo.cli.import_sms data/real_export.txt --out data/real_messages.jsonl
+    python -m tshepo.cli.train_tfidf --real data/real_labelled.jsonl   # label first!
+
+Real data goes in `data/` and is gitignored — never commit messages that contain names,
+phone numbers or references.
+
+On the real EcoCash/M-Pesa sample imported here, the rule parser extracts 98/119 EcoCash
+and 14/29 M-Pesa messages as genuine transactions. The balance-chain integrity check then
+flags incomplete exports (missing messages break the chain) for review instead of scoring
+them on partial data.
