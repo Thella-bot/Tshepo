@@ -35,7 +35,10 @@ def heavy_noise(rng, s):
     out = []
     for w in s.split(" "):
         if len(w) > 4 and w.isalpha() and rng.random() < 0.3:
-            j = rng.randint(1, len(w) - 2)
-            w = w[:j] + w[j + 1:] if rng.random() < 0.5 else w[:j] + w[j + 1] + w[j + 2] if j + 2 <= len(w) else w
+            j = rng.randint(1, len(w) - 3)  # j+2 must stay a valid index
+            if rng.random() < 0.5:
+                w = w[:j] + w[j + 1:]                      # drop a letter
+            else:
+                w = w[:j] + w[j + 1] + w[j] + w[j + 2:]    # swap two adjacent letters
         out.append(w)
     return " ".join(out)

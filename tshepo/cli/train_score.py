@@ -10,7 +10,6 @@ simulated behaviour. A good AUC here only proves the pipeline works. It says not
 import argparse
 import json
 import random
-from collections import defaultdict
 from datetime import datetime
 
 import numpy as np
@@ -20,7 +19,7 @@ from ..data.generator import build, phone, ref, stamp_mpesa
 from ..features.cashflow import FEATURES, band, build_features, make_passport, scorecard
 from ..models.scoring import ScoreModel
 from ..parsing.parser import extract_transactions
-from ..pipeline import group_by_user, ledger_for
+from ..pipeline import group_by_user
 
 
 def ks(y, s):

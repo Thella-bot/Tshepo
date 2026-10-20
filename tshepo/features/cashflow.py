@@ -1,7 +1,7 @@
 """
 Cash-flow features, ledger integrity check, transparent scorecard and the shareable "credit passport".
 
-Input: ledger rows for ONE user, as returned by sms_parser.extract_transactions()
+Input: ledger rows for ONE user, as returned by tshepo.parsing.parser.extract_transactions()
 (dicts with timestamp, direction, category, amount, fee, balance, operator, counterparty_*).
 
 The scorecard weights below are hand-set for a first demo. They are NOT calibrated on real repayment
@@ -9,7 +9,6 @@ outcomes. Calibrate (or replace with a fitted model) once a lender partner share
 """
 from __future__ import annotations
 
-import math
 from datetime import datetime, timedelta
 
 import numpy as np

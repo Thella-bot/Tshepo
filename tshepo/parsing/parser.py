@@ -22,20 +22,24 @@ from typing import Optional
 
 KNOWN_SENDERS = {"MPESA", "M-PESA", "ECOCASH", "BANKA", "BANKB", "VODACOM", "ECONET"}
 SENDER_OP = {"MPESA": "mpesa", "M-PESA": "mpesa", "ECOCASH": "ecocash", "BANKA": "bank", "BANKB": "bank"}
-
-CUR = r"(?<![A-Za-z0-9])(?:LSL\s?|M)"
-NUM = r"(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)"
+SENDER_TYPO = {"LPESA": "MPESA"}  # common typo in real exports
+# Operator short codes (Lesotho). EcoCash authentic sender is 199; M-Pesa uses M-Pesa.
+SHORT_CODES = {"199": "ecocash"}
+CUR = r"(?<![A-Za-z0-9])(?:LSL\s?|M)\s*"
+# Allow operator spacing ("M 102.07") and stray artifacts ("M1.36.00").
+NUM = r"((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?(?:\.\d{2})?)"
 AMT_RE = re.compile(CUR + NUM, re.I)
 BAL_RE = re.compile(rf"bal(?:ance)?\s*(?:is|:)?\s*{CUR}{NUM}", re.I)
-FEE_RE = re.compile(rf"(?:transaction\s+cost|fee|charge)s?\W{{0,3}}{CUR}{NUM}", re.I)
+FEE_RE = re.compile(rf"(?:transaction\s+cost|fee|charge)s?(?:\s+of)?\s*(?:is|:)?\s*{CUR}{NUM}", re.I)
 PHONE_RE = re.compile(r"(?<![A-Za-z0-9])(?:\+?266)?([56]\d{7})(?![A-Za-z0-9])")
 NAME = r"[A-Za-z][A-Za-z .'\-]{1,48}?"
 NAME_A = re.compile(rf"\b(?:to|from)\s+({NAME})\s*(?=\d{{8}}|\s(?:on|for)\b|\.|,|$)", re.I)
 NAME_B = re.compile(rf"(?<![A-Za-z0-9])[56]\d{{7}}\s+({NAME})(?=\.|,|$)", re.I)
 NAME_C = re.compile(rf"\bagent\s+({NAME})(?=\.|,|\s(?:on|for)\b|$)", re.I)
-
+# {agent/merchant id}-{name}, e.g. "37810-Sima Communication Msu Qoaling"
+MERCHANT_ID = re.compile(rf"(?<![A-Za-z0-9])(\d{{4,6}})\s*-\s*({NAME})(?=\s*(?:Approval|for\b|Wallet|New|\.|,|$))", re.I)
 IN_RE = re.compile(r"received|credited|deposit|cash\s?in|amohetse", re.I)
-OUT_RE = re.compile(r"\bsent\b|\bpaid\b|bought|debited|withdr|purchase", re.I)
+OUT_RE = re.compile(r"\bsent\b|\bpaid\b|bought|debited|withdr|purchase|cash\s?out|cashout|\bgive\b", re.I)
 MONTHS = {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split())}
 
 
@@ -50,13 +54,17 @@ class Parsed:
     balance: Optional[float] = None
     counterparty_name: Optional[str] = None
     counterparty_phone: Optional[str] = None
+    counterparty_id: Optional[str] = None
     reference: Optional[str] = None
     timestamp: Optional[str] = None
     confidence: float = 0.0
 
 
 def _num(s):
-    return float(s.replace(",", ""))
+    """Parse a number, tolerating stray artifacts like 'M1.36.00' (take first decimal pair)."""
+    s = s.replace(",", "")
+    m = re.match(r"\d+(?:\.\d{1,2})?", s)
+    return float(m.group(0)) if m else float(s)
 
 
 def _timestamp(text):
@@ -90,14 +98,18 @@ def parse(body: str, sender: Optional[str] = None) -> Parsed:
     s = (sender or "").strip().upper()
     p = Parsed()
 
+    ss = SENDER_TYPO.get(s, s)                       # tolerate typos like LPESA -> MPESA
     if "m-pesa" in low or "mpesa" in low:
         p.operator = "mpesa"
     elif "ecocash" in low:
         p.operator = "ecocash"
+    elif ss in SHORT_CODES:                          # EcoCash authentic sender is 199
+        p.operator = SHORT_CODES[ss]
     elif "avail bal" in low or re.search(r"\bacc\b", low):
         p.operator = "bank"
     else:
-        p.operator = SENDER_OP.get(s)
+        p.operator = SENDER_OP.get(ss)
+    resolved = ss if ss in KNOWN_SENDERS else (SHORT_CODES.get(ss) or SENDER_OP.get(ss))
 
     bal = BAL_RE.search(text)
     fee = FEE_RE.search(text)
@@ -117,6 +129,8 @@ def parse(body: str, sender: Optional[str] = None) -> Parsed:
 
     if re.search(r"loan|repay", low):
         p.category = "loan_repayment"
+    elif re.search(r"cash\s?out|cashout", low):
+        p.category = "withdrawal"
     elif "withdr" in low:
         p.category = "withdrawal"
     elif "airtime" in low:
@@ -125,7 +139,7 @@ def parse(body: str, sender: Optional[str] = None) -> Parsed:
         p.category = "bill"
     elif re.search(r"deposit|cash\s?in", low):
         p.category = "deposit"
-    elif re.search(r"\bpaid\b|\bpos\b|purchase", low):
+    elif re.search(r"\bpaid\b|\bpos\b|purchase|cash\s?to", low):
         p.category = "merchant"
     else:
         p.category = "transfer"
@@ -134,18 +148,24 @@ def parse(body: str, sender: Optional[str] = None) -> Parsed:
         d = re.search(r"ref:\s*(.+?)\.\s*avail", text, re.I)
         p.reference = d.group(1).strip() if d else None
     else:
-        r = re.match(r"^\s*([A-Z0-9]{10})\s+confirmed", text, re.I) or \
-            re.search(r"\bref(?:erence)?\W{0,3}([A-Z0-9]{6,12})\b", text, re.I)
+        r = (re.match(r"^\s*([A-Z0-9]{10})\s+confirmed", text, re.I)
+             or re.search(r"\bref(?:erence)?\W{0,3}([A-Z0-9]{6,12})\b", text, re.I)
+             or re.search(r"TxnId\s*:\s*([A-Z0-9]{6,12})", text, re.I))
         p.reference = r.group(1).upper() if r else None
         ph = PHONE_RE.search(text)
         p.counterparty_phone = ph.group(1) if ph else None
         n = NAME_A.search(text) or NAME_B.search(text) or NAME_C.search(text)
         p.counterparty_name = _clean_name(n.group(1)) if n else None
+        m = MERCHANT_ID.search(text)
+        p.counterparty_id = m.group(1).upper() if m else None
+        if m and not p.counterparty_name:
+            p.counterparty_name = _clean_name(m.group(2))
 
     p.timestamp = _timestamp(text)
     p.is_transaction = bool(p.operator and p.amount is not None and p.direction and p.balance is not None)
     got = [p.operator, p.amount, p.balance, p.direction, p.timestamp, p.reference]
     p.confidence = round(sum(x is not None for x in got) / len(got), 2)
+    p.resolved_sender = resolved
     return p
 
 
@@ -175,6 +195,7 @@ def red_flags(body: str, sender: Optional[str] = None, parsed: Optional[Parsed] 
     parsed = parsed or parse(body, sender)
     s = (sender or "").strip().upper()
     f = {}
+    resolved = parsed.resolved_sender or (SHORT_CODES.get(s) or SENDER_TYPO.get(s, s))
     if URL_RE.search(text):
         f["url"] = WEIGHTS["url"]
     for sent in re.split(r"(?<=[.!?])\s+", text):  # ignore sentences like "Never share your PIN"
@@ -191,7 +212,12 @@ def red_flags(body: str, sender: Optional[str] = None, parsed: Optional[Parsed] 
     if (parsed.amount is not None and (IN_RE.search(low) or OUT_RE.search(low)) and parsed.balance is None
             and re.search(r"\bconfirmed\b|amohetse|you have received", low)):
         f["unverifiable_txn"] = WEIGHTS["unverifiable_txn"]
-    if s and s not in KNOWN_SENDERS and CLAIMS_OFFICIAL_RE.search(low):
+    if s in SHORT_CODES:
+        resolved_sender = SHORT_CODES[s]
+    else:
+        resolved_sender = SENDER_TYPO.get(s, s)
+    if resolved_sender not in KNOWN_SENDERS and resolved_sender not in SENDER_OP.values() \
+            and CLAIMS_OFFICIAL_RE.search(low):
         f["spoofed_sender"] = WEIGHTS["spoofed_sender"]
     if URGENT_RE.search(low):
         f["urgent"] = WEIGHTS["urgent"]
@@ -214,7 +240,7 @@ def classify(body: str, sender: Optional[str] = None) -> dict:
 def extract_transactions(records, label_fn=None):
     """records: iterable of dicts with body, sender, received_at (and optional user_id).
     Returns ledger rows for genuine transactions only - the input to the credit-passport features.
-    label_fn(body, sender) -> label lets a trained model (see ml_classifier.py) act as the gate;
+    label_fn(body, sender) -> label lets a trained model (see tshepo.models.gate) act as the gate;
     the rule parser still extracts the fields, and rows it cannot parse as transactions are skipped."""
     rows = []
     for r in records:

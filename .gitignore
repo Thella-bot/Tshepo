@@ -14,3 +14,6 @@ venv/
 # Real user data must never be committed
 data/real_*.jsonl
 data/real_*.csv
+
+# pytest cache
+.pytest_cache/

@@ -24,5 +24,10 @@ def ensure_dir(path: str) -> str:
 
 
 def model_path(name: str) -> str:
-    """models/<name> unless an absolute path is given."""
-    return name if os.path.isabs(name) else os.path.join(MODELS_DIR, name)
+    """Resolve a model path: absolute paths are used as-is, "models/x" is relative to the
+    repo root, anything else is taken as a file name inside models/."""
+    if os.path.isabs(name):
+        return name
+    if name.replace("\\", "/").startswith("models/"):
+        return os.path.join(ROOT, name)
+    return os.path.join(MODELS_DIR, name)

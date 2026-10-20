@@ -1,5 +1,5 @@
 """Rule baseline: field extraction, scam flags, classification."""
-from tshepo.parsing.parser import classify, extract_transactions, parse, red_flags
+from tshepo.parsing.parser import classify, extract_transactions, parse
 
 MPESA_IN = ("RK12AB34CD Confirmed. You have received M100.00 from THABO MOKOENA 58123456 "
             "on 19/10/26 at 2:15 PM. New M-PESA balance is M900.00.")

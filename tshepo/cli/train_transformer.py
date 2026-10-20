@@ -15,10 +15,7 @@ Hardware notes: on CPU use --model distilbert-base-multilingual-cased and a smal
 (it is minutes, not hours). fp16 is only used on CUDA; CPU runs in fp32.
 """
 import argparse
-import os
 import random
-
-import numpy as np
 
 from ..config import LABELS, L2I, ensure_dir, model_path
 from ..data.generator import build
@@ -26,8 +23,11 @@ from ..evaluation import group_split, load_jsonl, print_table, report
 from ..textprep import heavy_noise
 
 
-def build_training_args(a, cuda):
-    """TrainingArguments renamed evaluation_strategy -> eval_strategy in transformers 4.46."""
+def build_training_args(a, cuda, n_train):
+    """TrainingArguments changed between transformers v4 and v5 (evaluation_strategy ->
+    eval_strategy, warmup_ratio dropped). Build the kwargs, keep only what this version
+    supports, and convert warmup_ratio into warmup_steps when needed."""
+    import inspect
     from transformers import TrainingArguments
 
     common = dict(
@@ -38,10 +38,16 @@ def build_training_args(a, cuda):
         dataloader_num_workers=0,  # multiprocessing is fragile on Windows
         disable_tqdm=not a.progress,
     )
-    try:
-        return TrainingArguments(eval_strategy="no", **common)
-    except TypeError:
-        return TrainingArguments(evaluation_strategy="no", **common)
+    supported = set(inspect.signature(TrainingArguments.__init__).parameters)
+    kwargs = {k: v for k, v in common.items() if k in supported}
+    dropped = sorted(set(common) - supported)
+    if dropped:
+        print(f"note: this transformers version ignores {', '.join(dropped)}")
+    if "warmup_ratio" not in supported and "warmup_steps" in supported:
+        steps = max(1, a.epochs * (n_train // max(a.batch, 1)))
+        kwargs["warmup_steps"] = int(0.1 * steps)
+    kwargs["eval_strategy" if "eval_strategy" in supported else "evaluation_strategy"] = "no"
+    return TrainingArguments(**kwargs)
 
 
 def main():
@@ -98,7 +104,7 @@ def main():
     model = AutoModelForSequenceClassification.from_pretrained(
         src, num_labels=len(LABELS), id2label=dict(enumerate(LABELS)), label2id=L2I)
 
-    args = build_training_args(a, cuda)
+    args = build_training_args(a, cuda, len(tr))
     trainer = Trainer(model=model, args=args, train_dataset=None if a.eval_only else Sms(tr, tok))
     if not a.eval_only:
         trainer.train()

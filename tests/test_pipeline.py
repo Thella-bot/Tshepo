@@ -22,6 +22,19 @@ def test_prep_normalises_digits():
     assert out.startswith("SNDKNOWN")
 
 
+def test_heavy_noise_never_crashes_and_changes_words():
+    """Regression: short alphabetic words (len 5) used to raise IndexError."""
+    import random
+    from tshepo.textprep import heavy_noise
+    rng = random.Random(0)
+    for _ in range(300):
+        out = heavy_noise(rng, "Hello world balance bla bla")
+        assert isinstance(out, str) and out
+    # the swap branch must actually transpose letters, not copy them
+    changed = heavy_noise(random.Random(1), "balance")
+    assert changed != "balance"
+
+
 def test_group_split_has_no_user_leakage(small_dataset):
     records, _ = small_dataset
     tr, te = group_split(records, 0.3, seed=1)

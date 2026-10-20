@@ -15,8 +15,6 @@ CLI: python -m tshepo.cli.generate --users 200 --seed 42 --out data/synthetic_sm
 """
 from __future__ import annotations
 
-import csv
-import json
 import math
 import random
 from datetime import datetime, timedelta
