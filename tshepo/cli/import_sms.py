@@ -20,7 +20,6 @@ import os
 import re
 
 from ..config import LABELS, ensure_dir
-from ..evaluation import load_jsonl
 
 BLOCK_RE = re.compile(
     r"^Received from (?P<sender>.+?) on (?P<date>\d{4}-\d{2}-\d{2})[ T](?P<time>\d{2}:\d{2})",

@@ -4,92 +4,155 @@ This is the reusable core; the CLI scripts in tshepo.cli are thin wrappers aroun
 It is the piece a production service would call per applicant:
 
     from tshepo.pipeline import score_user
-    passport = score_user(messages, label_fn=load_gate("models/hybrid.joblib"))
+    from tshepo.models.gate import load_gate
+    from tshepo.resilience import fallback_gate
+
+    gate = fallback_gate(load_gate("models/hybrid.joblib"))  # degrades to rule gate
+    passport = score_user(messages, label_fn=gate, correlation_id_value="req-123")
 """
 from __future__ import annotations
 
 import time
 from collections import defaultdict
+from typing import Any, Optional, cast
 
 from .features.cashflow import build_features, make_passport, scorecard
-from .logging import get_logger
-from .models.gate import rule_gate
+from .logging import correlation_id, get_logger, new_correlation_id
+from .models.gate import GateFn, rule_gate
 from .parsing.parser import extract_transactions
-from .security import RateLimiter, validate_records
+from .resilience import ModelError, fallback_gate, time_budget
+from .security import RateLimiter, RateLimitExceeded, validate_records
 
 logger = get_logger("pipeline")
 _rate_limiter = RateLimiter()
 
 
-def group_by_user(records):
+def group_by_user(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     """records -> {user_id: [record, ...]}"""
-    out = defaultdict(list)
+    out: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in records:
-        out[r.get("user_id")].append(r)
+        out[str(r.get("user_id"))].append(r)
     return out
 
 
-def ledger_for(records, label_fn=None):
+def ledger_for(records: list[dict[str, Any]], label_fn: Optional[GateFn] = None) -> list[dict[str, Any]]:
     """The transactions the gate trusts, as ledger rows."""
-    return extract_transactions(records, label_fn=label_fn or rule_gate)
+    return cast(list[dict[str, Any]], extract_transactions(records, label_fn=label_fn or rule_gate))
 
 
-def features_for(records, label_fn=None):
+def features_for(records: list[dict[str, Any]], label_fn: Optional[GateFn] = None) -> dict[str, float]:
     """Cash-flow features for ONE user from their message list."""
-    return build_features(ledger_for(records, label_fn=label_fn))
+    return cast(dict[str, float], build_features(ledger_for(records, label_fn=label_fn)))
 
 
-def score_user(records, label_fn=None, user_label="applicant", pd_model=None,
-               rate_limit_key=None):
-    """Full passport for one user: gate -> ledger -> features -> scorecard.
+def score_user(
+    records: list[dict[str, Any]],
+    label_fn: Optional[GateFn] = None,
+    user_label: str = "applicant",
+    pd_model: Optional[Any] = None,
+    rate_limit_key: Optional[str] = None,
+    correlation_id_value: Optional[str] = None,
+) -> dict[str, Any]:
+    """Full passport for one user: gate -> ledger -> features -> score.
 
     pd_model: optional fitted ScoreModel; when given its probability of default is
     reported alongside the transparent score.
     rate_limit_key: optional key for per-user rate limiting.
+    correlation_id_value: request-scoped correlation id for tracing.
     """
-    if rate_limit_key is not None and not _rate_limiter.allow(rate_limit_key):
-        raise RuntimeError(f"rate limit exceeded for {rate_limit_key}")
+    cid = correlation_id_value or new_correlation_id()
+    token = correlation_id.set(cid)
+    try:
+        if rate_limit_key is not None and not _rate_limiter.allow(rate_limit_key):
+            raise RateLimitExceeded(f"rate limit exceeded for {rate_limit_key}")
 
-    t0 = time.monotonic()
-    records = validate_records(records)
-    rows = ledger_for(records, label_fn=label_fn)
-    f = build_features(rows)
-    sc = scorecard(f)
-    pd_score = None
-    if pd_model is not None:
-        pd_score = round(float(850 - 550 * pd_model.predict_proba(f)), 1)
-    passport = make_passport(rows, user_label=user_label, pd_model_score=pd_score)
-    passport["score"] = sc["score"]
-    dur_ms = (time.monotonic() - t0) * 1000
-    logger.info("scored user", extra={"user_id": user_label, "score": sc["score"],
-                                      "duration_ms": round(dur_ms, 1)})
-    return passport
+        # graceful degradation: ensure the gate never fails the whole request
+        gate = label_fn or rule_gate
+        if label_fn is not None:
+            gate = fallback_gate(label_fn)
+
+        with time_budget(5.0, "score_user"):
+            t0 = time.monotonic()
+            records = validate_records(records)
+            rows = ledger_for(records, label_fn=gate)
+            f = build_features(rows)
+            sc = scorecard(f)
+            pd_score: Optional[float] = None
+            if pd_model is not None:
+                pd_score = round(float(850 - 550 * pd_model.predict_proba(f)), 1)
+            passport = cast(dict[str, Any], make_passport(rows, user_label=user_label, pd_model_score=pd_score))
+            passport["score"] = sc["score"]
+            dur_ms = (time.monotonic() - t0) * 1000
+            logger.info(
+                "scored user",
+                extra={"user_id": user_label, "score": sc["score"], "duration_ms": round(dur_ms, 1), "correlation_id": cid},
+            )
+            return passport
+    except RateLimitExceeded:
+        raise
+    except ModelError:
+        raise
+    except Exception as e:  # noqa: BLE001 - surface as a Tshepo error for the API layer
+        logger.exception("score_user failed", extra={"user_id": user_label, "correlation_id": cid})
+        raise ModelError(f"scoring failed for {user_label}: {e}") from e
+    finally:
+        correlation_id.reset(token)
 
 
-def score_batch(records, label_fn=None, pd_model=None, chunk_size=500,
-                rate_limit_key=None):
+def score_batch(
+    records: list[dict[str, Any]],
+    label_fn: Optional[GateFn] = None,
+    pd_model: Optional[Any] = None,
+    chunk_size: int = 500,
+    rate_limit_key: Optional[str] = None,
+    correlation_id_value: Optional[str] = None,
+) -> dict[str, dict[str, Any]]:
     """Score many users in bounded chunks to cap memory use.
 
     Returns {user_id: passport}. Records are validated and grouped by user;
     each user's ledger is capped at MAX_RECORDS_PER_USER by the security layer.
     """
-    records = validate_records(records)
-    by_user = group_by_user(records)
-    out = {}
-    processed = 0
-    for uid, recs in by_user.items():
-        if rate_limit_key is not None and not _rate_limiter.allow(f"{rate_limit_key}:{uid}"):
-            logger.warning("rate limited, skipping user", extra={"user_id": uid})
-            continue
-        # cap per-user ledger size for memory safety
-        recs = recs[:5000]
-        out[uid] = score_user(recs, label_fn=label_fn, user_label=uid, pd_model=pd_model)
-        processed += 1
-        if processed % chunk_size == 0:
-            logger.info("batch progress", extra={"processed": processed, "total": len(by_user)})
-    return out
+    cid = correlation_id_value or new_correlation_id()
+    token = correlation_id.set(cid)
+    try:
+        records = validate_records(records)
+        by_user = group_by_user(records)
+        out: dict[str, dict[str, Any]] = {}
+        processed = 0
+        with time_budget(30.0, "score_batch"):
+            for uid, recs in by_user.items():
+                if rate_limit_key is not None and not _rate_limiter.allow(f"{rate_limit_key}:{uid}"):
+                    logger.warning("rate limited, skipping user", extra={"user_id": uid, "correlation_id": cid})
+                    continue
+                recs = recs[:5000]
+                out[uid] = score_user(
+                    recs,
+                    label_fn=label_fn,
+                    user_label=uid,
+                    pd_model=pd_model,
+                    correlation_id_value=cid,
+                )
+                processed += 1
+                if processed % chunk_size == 0:
+                    logger.info(
+                        "batch progress",
+                        extra={"processed": processed, "total": len(by_user), "correlation_id": cid},
+                    )
+        return out
+    finally:
+        correlation_id.reset(token)
 
 
-def score_dataset(records, label_fn=None, pd_model=None):
+def score_dataset(
+    records: list[dict[str, Any]],
+    label_fn: Optional[GateFn] = None,
+    pd_model: Optional[Any] = None,
+    correlation_id_value: Optional[str] = None,
+) -> dict[str, dict[str, Any]]:
     """Score every user in a record set. Returns {user_id: passport}."""
-    return score_batch(records, label_fn=label_fn, pd_model=pd_model)
+    return score_batch(
+        records,
+        label_fn=label_fn,
+        pd_model=pd_model,
+        correlation_id_value=correlation_id_value,
+    )

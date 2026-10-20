@@ -104,3 +104,24 @@ Synthetic: the message templates, the Sesotho phrasing, the bank sender IDs, and
 repayment outcomes used to fit the scoring model. Numbers on synthetic data measure
 the pipeline, not the product. The number that matters is the one on held-out real
 messages, and the score that matters is the one fitted on real repayment outcomes.
+
+## Security & scalability
+
+**Security**
+* `tshepo.security` validates every message: bodies capped at 4 KiB, null/control bytes
+  stripped, senders validated against an allow-list pattern.
+* Model artefacts are loaded only from `models/`; relative model names are path-confined
+  to prevent traversal. `joblib`/`pickle` can execute arbitrary code on load — only load
+  artefacts you produced or audited.
+* A sliding-window rate limiter caps scoring calls per key (default 120/min).
+* Batches are capped at 200k records; per-user ledgers at 5k rows.
+
+**Scalability**
+* `score_batch` processes users in bounded chunks with per-user ledger capping and
+  progress logging, so memory stays flat as the user count grows.
+* `ScoreModel.predict_proba_batch` vectorises predictions across many feature dicts.
+* Regexes are compiled once at module load (no per-message recompilation).
+
+**Health checks**
+* `tshepo.health.check_all` verifies the parser, features, scorecard and models dir
+  before deploying or in a readiness probe.

@@ -28,15 +28,20 @@ hybrid that also reads the rule flags), and a fine-tuned multilingual transforme
 
     tshepo/
       config.py            paths, label set
+      logging.py           structured logging (JSON/text)
+      security.py          input validation, safe model loading, rate limiting
+      health.py            production health checks
       textprep.py          model input prep (sender tag + digit normalisation)
       evaluation.py        user-level split, metrics
       pipeline.py          end-to-end core: messages -> gate -> ledger -> features -> score
       data/
         generator.py       synthetic SMS streams (genuine / suspicious / noise) with chained balances
       parsing/
-        parser.py          regex field extraction + scam red flags (the baseline)
+        fields.py          regex field extraction (Parsed, parse)
+        rules.py           scam red flags + rule classifier (red_flags, classify)
+        parser.py          compatibility shim (re-exports fields + rules)
       features/
-        cashflow.py        20 cash-flow features, balance-chain integrity, transparent scorecard
+        cashflow.py        27 cash-flow features, balance-chain integrity, transparent scorecard
       models/
         tfidf.py           TF-IDF (char+word) + logistic regression, and the hybrid variant
         transformer.py     fine-tuned multilingual transformer, same interface as tfidf
@@ -46,12 +51,13 @@ hybrid that also reads the rule flags), and a fine-tuned multilingual transforme
         generate.py        write a synthetic dataset
         evaluate.py        rule baseline report
         parse_sms.py       parse one SMS
+        import_sms.py      import a phone export (txt -> JSONL)
         predict.py         classify messages with rules / tfidf / hybrid / transformer
         passport.py        build a credit passport per user from a message file
         train_tfidf.py     train the TF-IDF and hybrid classifiers
         train_transformer.py  fine-tune the transformer
         train_score.py     train the cash-flow scoring model end to end
-    tests/                 pytest suite (parser, generator, features, pipeline)
+    tests/                 pytest suite (parser, generator, features, pipeline, security, health)
     data/                  generated or hand-labelled message files (gitignored)
     models/                trained artefacts (gitignored)
     docs/                  architecture notes
@@ -91,6 +97,44 @@ or from the command line:
 
     python -m tshepo.cli.predict "Your PIN is required to..." --sender +26658123456 --model hybrid
     python -m tshepo.cli.passport --file data/synthetic_sms.jsonl --gate models/hybrid.joblib
+
+## Security hardening
+
+* **Safe model loading**: artefacts are loaded only from `models/` (path traversal is
+  blocked). `joblib`/`pickle` can execute arbitrary code on load — only load artefacts
+  you produced or audited.
+* **Input validation**: message bodies are capped at 4 KiB, null/control bytes are
+  stripped, and senders are validated against an allow-list pattern.
+* **Rate limiting**: a sliding-window limiter caps scoring calls per key (default 120/min).
+* **Bounds**: batches are capped at 200k records; per-user ledgers at 5k rows.
+
+    from tshepo.security import validate_message, SecurityError
+    body, sender = validate_message(body, sender)   # raises on oversized / malformed input
+
+## Health checks
+
+Run before deploying or in a readiness probe:
+
+    from tshepo.health import check_all
+    report = check_all()   # {"parser": {...}, "features": {...}, "scorecard": {...},
+                           #  "models_dir": {...}, "ok": bool}
+
+## Batch scoring
+
+Score many users with bounded memory (per-user ledger capped, progress logged):
+
+    from tshepo.pipeline import score_batch
+    passports = score_batch(records, label_fn=load_gate("models/hybrid.joblib"))
+
+## Model versioning
+
+Fitted scoring models carry `metadata` (kind, n_train, base rate, version, created_at)
+and expose `feature_importances()` so scoring decisions stay explainable:
+
+    from tshepo.models.scoring import ScoreModel
+    m = ScoreModel.load("models/score_gb.joblib")
+    print(m.metadata["version"])            # "1.0"
+    print(m.feature_importances())          # per-feature importance magnitudes
 
 ## Real-data file format
 

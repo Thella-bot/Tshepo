@@ -24,6 +24,12 @@ transformer = [
 ]
 dev = [
     "pytest>=8.0",
+    "hypothesis>=6.0",
+    "mypy>=1.11",
+]
+api = [
+    "fastapi>=0.100",
+    "uvicorn>=0.20",
 ]
 
 [project.scripts]
@@ -35,6 +41,7 @@ tshepo-passport = "tshepo.cli.passport:main"
 tshepo-train-tfidf = "tshepo.cli.train_tfidf:main"
 tshepo-train-transformer = "tshepo.cli.train_transformer:main"
 tshepo-train-score = "tshepo.cli.train_score:main"
+tshepo-serve = "tshepo.cli.serve:main"
 
 [tool.setuptools.packages.find]
 include = ["tshepo*"]

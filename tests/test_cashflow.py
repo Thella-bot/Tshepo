@@ -66,3 +66,40 @@ def test_build_features_handles_any_ledger_size(n):
     rows = [_row("2026-09-01T10:00", "in", 100, 100 + i) for i in range(n)]
     f = build_features(rows)
     assert f["n_txn"] == n
+
+
+def test_new_features_present_and_bounded():
+    rows = [_row(f"2026-09-{d:02d}T{h:02d}:00", "in", 3000, 3000 + d * 100) for d in range(1, 20)
+            for h in (10, 23)]
+    f = build_features(rows)
+    for k in FEATURES:
+        assert k in f
+    assert 0 <= f["night_txn_share"] <= 1
+    assert 0 <= f["weekend_txn_share"] <= 1
+    assert 0 <= f["fee_burden"] <= 1
+    assert 0 <= f["round_amount_share"] <= 1
+    assert 0 <= f["dow_regularity"] <= 1
+    assert f["txn_per_day"] >= 0
+    assert f["amount_velocity"] >= 0
+
+
+def test_night_txn_share_detects_night_activity():
+    rows = [_row("2026-09-01T23:00", "in", 100, 100), _row("2026-09-02T10:00", "out", 10, 90)]
+    f = build_features(rows)
+    assert f["night_txn_share"] == 0.5
+
+
+def test_fee_burden_computed():
+    rows = [_row("2026-09-01T10:00", "out", 100, 900, fee=5.0),
+            _row("2026-09-02T10:00", "out", 100, 795, fee=5.0)]
+    f = build_features(rows)
+    assert abs(f["fee_burden"] - (10.0 / 210.0)) < 0.01
+
+
+def test_empty_ledger_new_features_zero():
+    f = build_features([])
+    assert f["txn_per_day"] == 0.0
+    assert f["amount_velocity"] == 0.0
+    assert f["night_txn_share"] == 0.0
+    assert f["dow_regularity"] == 0.0
+

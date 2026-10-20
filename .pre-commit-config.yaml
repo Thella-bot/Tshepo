@@ -1,0 +1,34 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: no-commit-to-branch
+        args: ["--branch=main"]
+
+  - repo: https://github.com/pycqa/pyflakes
+    rev: 3.2.0
+    hooks:
+      - id: pyflakes
+        args: ["tshepo", "tests"]
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.0
+    hooks:
+      - id: mypy
+        additional_dependencies: [types-PyYAML]
+        args: ["--config-file=mypy.ini", "tshepo/"]
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: pytest tests -q
+        language: system
+        pass_filenames: false
+        files: ^tests/|^tshepo/

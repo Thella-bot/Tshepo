@@ -13,9 +13,9 @@ import os
 
 import torch
 
-from ..config import LABELS, L2I, model_path
+from ..config import LABELS, L2I
 from ..logging import get_logger
-from ..security import _confine
+from ..security import safe_model_path
 from ..textprep import prep
 
 logger = get_logger("models.transformer")
@@ -33,7 +33,7 @@ class TransformerSmsClassifier:
     def load(cls, path="models/transformer", device=None):
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-        path = _confine(path, os.path.dirname(model_path(path)))
+        path = safe_model_path(path)
         if not os.path.isdir(path):
             raise FileNotFoundError(
                 f"no transformer at {path}. Train one: python -m tshepo.cli.train_transformer")

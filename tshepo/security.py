@@ -19,23 +19,52 @@ import re
 import time
 from collections import defaultdict, deque
 from functools import wraps
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
-from ..config import MODELS_DIR, ROOT
+from .config import MODELS_DIR, ROOT, get
 
-# --------------------------------------------------------------------------- limits
-MAX_BODY_LEN = 4096          # characters per SMS body
-MAX_SENDER_LEN = 64
-MAX_RECORDS_PER_USER = 5000  # ledger rows considered per user
-MAX_RECORDS_TOTAL = 200_000  # records processed in a single batch call
-RATE_WINDOW = 60.0           # seconds
-RATE_MAX = 120               # scoring calls per window per key
+# --------------------------------------------------------------------------- limits (overridable via TSHEPO_* env / config file)
+def _body_len() -> int:
+    return int(get("MAX_BODY_LEN", 4096))
 
-SENDER_RE = re.compile(r"^[A-Za-z0-9_\-+\. ]{1,64}$")
+
+def _sender_len() -> int:
+    return int(get("MAX_SENDER_LEN", 64))
+
+
+def _records_per_user() -> int:
+    return int(get("MAX_RECORDS_PER_USER", 5000))
+
+
+def _records_total() -> int:
+    return int(get("MAX_RECORDS_TOTAL", 200000))
+
+
+def _rate_window() -> float:
+    return float(get("RATE_WINDOW", 60.0))
+
+
+def _rate_max() -> int:
+    return int(get("RATE_MAX", 120))
+
+
+SENDER_RE = re.compile(r"^[A-Za-z0-9_\-+\. ]{1,128}$")
+
+# Backward-compatible module-level names (tests / importers may reference these directly).
+MAX_BODY_LEN: int = _body_len()
+MAX_SENDER_LEN: int = _sender_len()
+MAX_RECORDS_PER_USER: int = _records_per_user()
+MAX_RECORDS_TOTAL: int = _records_total()
+RATE_WINDOW: float = _rate_window()
+RATE_MAX: int = _rate_max()
 
 
 class SecurityError(ValueError):
     """Raised when an input fails a security check."""
+
+
+class RateLimitExceeded(SecurityError):
+    """Raised when a per-key rate limit is exceeded."""
 
 
 def validate_message(body: str, sender: Optional[str] = None) -> tuple[str, Optional[str]]:
@@ -45,27 +74,27 @@ def validate_message(body: str, sender: Optional[str] = None) -> tuple[str, Opti
     """
     if not isinstance(body, str):
         raise SecurityError("body must be a string")
-    if len(body) > MAX_BODY_LEN:
-        raise SecurityError(f"body exceeds {MAX_BODY_LEN} characters")
+    if len(body) > _body_len():
+        raise SecurityError(f"body exceeds {_body_len()} characters")
     # Null bytes and control characters are not meaningful in SMS; strip them.
     body = body.replace("\x00", "").replace("\r", " ")
     body = " ".join(body.split())
     if sender is not None:
-        if not isinstance(sender, str) or len(sender) > MAX_SENDER_LEN:
-            raise SecurityError("sender must be a string of at most 64 characters")
+        if not isinstance(sender, str) or len(sender) > _sender_len():
+            raise SecurityError(f"sender must be a string of at most {_sender_len()} characters")
         if not SENDER_RE.match(sender.strip()):
             raise SecurityError("sender contains disallowed characters")
         sender = sender.strip()
     return body, sender
 
 
-def validate_records(records) -> list[dict]:
+def validate_records(records: Any) -> list[dict[str, Any]]:
     """Bound and normalise a list of message records."""
     if not isinstance(records, (list, tuple)):
         raise SecurityError("records must be a list")
-    if len(records) > MAX_RECORDS_TOTAL:
-        raise SecurityError(f"batch exceeds {MAX_RECORDS_TOTAL} records")
-    clean = []
+    if len(records) > _records_total():
+        raise SecurityError(f"batch exceeds {_records_total()} records")
+    clean: list[dict[str, Any]] = []
     for i, r in enumerate(records):
         if not isinstance(r, dict):
             raise SecurityError(f"record {i} is not an object")
@@ -85,26 +114,45 @@ def validate_records(records) -> list[dict]:
 
 # --------------------------------------------------------------------------- path confinement
 def _confine(path: str, base: str) -> str:
-    """Resolve ``path`` and refuse anything outside ``base`` (path traversal guard)."""
+    """Resolve ``path`` and refuse anything outside ``base`` (path traversal guard).
+
+    Relative names are confined under ``base``. Absolute paths are returned as-is
+    (the caller explicitly named them); only relative model *names* are sandboxed.
+    """
+    if os.path.isabs(path):
+        return os.path.abspath(path)
     base_abs = os.path.abspath(base)
-    target = os.path.abspath(os.path.join(base_abs, path)) if not os.path.isabs(path) else os.path.abspath(path)
+    target = os.path.abspath(os.path.join(base_abs, path))
     if not (target == base_abs or target.startswith(base_abs + os.sep)):
         raise SecurityError(f"path escapes model directory: {path}")
     return target
 
 
 def safe_model_path(name: str) -> str:
-    """Resolve a model artefact path, confined to ``models/``."""
-    return _confine(name, MODELS_DIR)
+    """Resolve a model artefact path, confined to ``models/``.
+
+    Honours the same ``models/`` prefix convention as :func:`tshepo.config.model_path`,
+    then verifies the result stays inside ``models/`` (path traversal guard).
+    """
+    if os.path.isabs(name):
+        return os.path.abspath(name)
+    if name.replace("\\", "/").startswith("models/"):
+        resolved = os.path.abspath(os.path.join(ROOT, name))
+    else:
+        resolved = os.path.abspath(os.path.join(MODELS_DIR, name))
+    base_abs = os.path.abspath(MODELS_DIR)
+    if not (resolved == base_abs or resolved.startswith(base_abs + os.sep)):
+        raise SecurityError(f"path escapes model directory: {name}")
+    return resolved
 
 
 # --------------------------------------------------------------------------- rate limiting
 class RateLimiter:
     """Token-bucket-ish sliding-window rate limiter keyed by an arbitrary id."""
 
-    def __init__(self, max_calls: int = RATE_MAX, window: float = RATE_WINDOW):
-        self.max_calls = max_calls
-        self.window = window
+    def __init__(self, max_calls: Optional[int] = None, window: Optional[float] = None):
+        self.max_calls = max_calls if max_calls is not None else _rate_max()
+        self.window = window if window is not None else _rate_window()
         self._hits: dict[str, deque[float]] = defaultdict(deque)
 
     def allow(self, key: str = "default") -> bool:
@@ -131,15 +179,15 @@ class RateLimiter:
 rate_limiter = RateLimiter()
 
 
-def rate_limited(key_fn: Optional[Callable[..., str]] = None):
+def rate_limited(key_fn: Optional[Callable[..., str]] = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Decorator: refuse calls once the per-key rate limit is exceeded."""
 
-    def dec(fn):
+    def dec(fn: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(fn)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
             key = key_fn(*args, **kwargs) if key_fn else "default"
             if not rate_limiter.allow(key):
-                raise SecurityError("rate limit exceeded")
+                raise RateLimitExceeded("rate limit exceeded")
             return fn(*args, **kwargs)
 
         return wrapper
@@ -148,14 +196,14 @@ def rate_limited(key_fn: Optional[Callable[..., str]] = None):
 
 
 # --------------------------------------------------------------------------- safe deserialisation
-def load_model(path: str):
+def load_model(path: str) -> Any:
     """Load a joblib artefact after confining its path to ``models/``.
 
     WARNING: joblib/pickle can execute arbitrary code on load. Only load artefacts
     you have produced yourself or have audited. Consider re-saving untrusted models
     through ``tshepo.models.scoring`` before loading them here.
     """
-    import joblib
+    import joblib  # type: ignore[import-untyped]
 
     p = safe_model_path(path)
     if not os.path.exists(p):

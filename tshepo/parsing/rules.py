@@ -41,7 +41,6 @@ def red_flags(body: str, sender: Optional[str] = None, parsed: Optional[Parsed] 
     parsed = parsed or parse(body, sender)
     s = (sender or "").strip().upper()
     f = {}
-    resolved = parsed.resolved_sender or (SHORT_CODES.get(s) or SENDER_TYPO.get(s, s))
     if URL_RE.search(text):
         f["url"] = WEIGHTS["url"]
     for sent in re.split(r"(?<=[.!?])\s+", text):  # ignore "Never share your PIN"

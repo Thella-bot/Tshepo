@@ -17,3 +17,12 @@ data/real_*.csv
 
 # pytest cache
 .pytest_cache/
+
+# Environment
+.env
+
+# mypy cache
+.mypy_cache/
+
+# pre-commit cache
+.pre-commit-cache/
