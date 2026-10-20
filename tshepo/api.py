@@ -21,15 +21,17 @@ Set ``TSHEPO_API_KEY`` to require ``X-API-Key`` header on write endpoints.
 """
 from __future__ import annotations
 
+import hashlib
 import time
 from typing import Any, Callable, Optional, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, Security
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, validator
 
-from .config import API_KEY, model_path
+from .config import API_KEY, CORS_ORIGINS, ENABLE_DOCS, MAX_REQUEST_SIZE_MB, model_path
 from .health import check_all
 from .logging import get_logger, log_context, new_correlation_id
 from .models.gate import load_gate, load_transformer_gate, rule_gate
@@ -39,7 +41,56 @@ from .security import RateLimitExceeded, validate_message, validate_records
 
 logger = get_logger("api")
 
-app = FastAPI(title="Tshepo SMS Credit Passport", version="0.2.0")
+app = FastAPI(
+    title="Tshepo SMS Credit Passport",
+    version="0.2.0",
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
+)
+
+# --------------------------------------------------------------------------- security headers
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "default-src 'none'",
+}
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next: Callable[[Request], Any]) -> Any:
+    response = await call_next(request)
+    for k, v in SECURITY_HEADERS.items():
+        response.headers[k] = v
+    return response
+
+
+# --------------------------------------------------------------------------- CORS
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["GET", "POST"],
+        allow_headers=["content-type", "x-api-key", "x-correlation-id"],
+        max_age=600,
+    )
+
+
+# --------------------------------------------------------------------------- request size limit
+MAX_REQUEST_SIZE = int(MAX_REQUEST_SIZE_MB * 1024 * 1024)
+
+
+@app.middleware("http")
+async def _limit_request_size(request: Request, call_next: Callable[[Request], Any]) -> Any:
+    content_length = request.headers.get("content-length")
+    if content_length is not None and int(content_length) > MAX_REQUEST_SIZE:
+        return JSONResponse(
+            status_code=413,
+            content={"detail": f"request body too large (max {MAX_REQUEST_SIZE_MB} MB)", "code": "request_too_large"},
+        )
+    return await call_next(request)
 
 # --------------------------------------------------------------------------- auth
 api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
@@ -50,6 +101,8 @@ def verify_api_key(api_key: Optional[str] = Security(api_key_header)) -> None:
     if API_KEY is None:
         return  # auth not configured; leave endpoints open
     if api_key is None or api_key != API_KEY:
+        if AUTH_FAILURES is not None:
+            AUTH_FAILURES.inc()
         raise HTTPException(status_code=401, detail="invalid or missing API key")
 
 
@@ -187,6 +240,8 @@ async def metrics() -> PlainTextResponse:
 async def health() -> Response:
     """Readiness probe: returns ok=true only when all subsystems are healthy."""
     report = check_all()
+    report["circuit_breaker"] = _GATE_BREAKER.state
+    report["api_configured"] = API_KEY is not None
     status = 200 if report.get("ok") else 503
     return JSONResponse(content=report, status_code=status)
 
@@ -205,9 +260,17 @@ async def predict(
     label = gate(body, sender)
     if PREDICT_COUNT is not None:
         PREDICT_COUNT.labels(model=req.model).inc()
+    body_digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
     logger.info(
         "prediction",
-        extra={"correlation_id": cid, "model": req.model, "label": label, "rule_label": rule_res["label"]},
+        extra={
+            "correlation_id": cid,
+            "model": req.model,
+            "label": label,
+            "rule_label": rule_res["label"],
+            "body_len": len(body),
+            "body_digest": body_digest,
+        },
     )
     return PredictResponse(
         label=label,

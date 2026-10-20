@@ -38,6 +38,9 @@ MAX_RECORDS_TOTAL: int = int(os.environ.get("TSHEPO_MAX_RECORDS_TOTAL", "200000"
 RATE_WINDOW: float = float(os.environ.get("TSHEPO_RATE_WINDOW", "60"))
 RATE_MAX: int = int(os.environ.get("TSHEPO_RATE_MAX", "120"))
 API_KEY: str | None = os.environ.get("TSHEPO_API_KEY")
+ENABLE_DOCS: bool = os.environ.get("TSHEPO_ENABLE_DOCS", "0") == "1"
+CORS_ORIGINS: list[str] = [o.strip() for o in os.environ.get("TSHEPO_CORS_ORIGINS", "").split(",") if o.strip()]
+MAX_REQUEST_SIZE_MB: float = float(os.environ.get("TSHEPO_MAX_REQUEST_SIZE_MB", "10"))
 
 _CONFIG_CACHE: dict[str, Any] | None = None
 

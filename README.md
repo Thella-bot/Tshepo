@@ -106,6 +106,9 @@ or from the command line:
 * **Input validation**: message bodies are capped at 4 KiB, null/control bytes are
   stripped, and senders are validated against an allow-list pattern.
 * **Rate limiting**: a sliding-window limiter caps scoring calls per key (default 120/min).
+* **Circuit breaker**: the gate trips after consecutive model failures and falls back to
+  the zero-dependency rule gate; state is reported in `/health`.
+* **API key auth**: set `TSHEPO_API_KEY` to require `X-API-Key` on `/predict` and `/score`.
 * **Bounds**: batches are capped at 200k records; per-user ledgers at 5k rows.
 
     from tshepo.security import validate_message, SecurityError
@@ -118,6 +121,53 @@ Run before deploying or in a readiness probe:
     from tshepo.health import check_all
     report = check_all()   # {"parser": {...}, "features": {...}, "scorecard": {...},
                            #  "models_dir": {...}, "ok": bool}
+
+## Running the HTTP API
+
+Serve the API with uvicorn:
+
+    pip install -e ".[api]"
+    TSHEPO_API_KEY=<strong-key> python -m tshepo.cli.serve --port 8080
+
+Or with Docker:
+
+    docker build -t tshepo .
+    docker run -e TSHEPO_API_KEY=<strong-key> -p 8080:8080 tshepo
+
+Endpoints:
+
+* `GET /health` — readiness probe (no auth). Returns `ok=true` only when all
+  subsystems are healthy, plus circuit-breaker state.
+* `GET /metrics` — Prometheus metrics (no auth).
+* `POST /predict` — classify one message (API key required when
+  `TSHEPO_API_KEY` is set).
+* `POST /score` — score many users into credit passports (API key required).
+* `GET /docs`, `GET /redoc` — disabled by default; set `TSHEPO_ENABLE_DOCS=1` to
+  enable (not recommended in production).
+
+Security headers (`X-Content-Type-Options`, `X-Frame-Options`, `CSP`) are set on
+every response. Request bodies are capped (`TSHEPO_MAX_REQUEST_SIZE_MB`, default
+10 MB). CORS is disabled unless `TSHEPO_CORS_ORIGINS` is set.
+
+    # classify one message
+    curl -H "X-API-Key: <strong-key>" -H "Content-Type: application/json" \
+      -d '{"body":"RK12AB34CD Confirmed. You have received M100.00 ...","sender":"MPESA","model":"rules"}' \
+      http://localhost:8080/predict
+
+    # score many users
+    curl -H "X-API-Key: <strong-key>" -H "Content-Type: application/json" \
+      -d '{"messages":[{"body":"...","sender":"MPESA","user_id":"U1"}]}' \
+      http://localhost:8080/score
+
+## Circuit breaker
+
+The gate uses a circuit breaker (`tshepo.resilience.CircuitBreaker`) that trips
+after consecutive model failures and falls back to the zero-dependency rule gate.
+State is reported in `/health` under `circuit_breaker` (`closed`/`open`/`half-open`).
+
+## Load testing
+
+    python scripts/load_test.py --requests 500 --concurrency 20
 
 ## Batch scoring
 

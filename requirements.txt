@@ -9,5 +9,13 @@ torch>=2.0
 transformers>=4.40
 accelerate>=0.30
 
+# HTTP API (optional extra: `pip install -e ".[api]"`)
+fastapi>=0.115.0
+uvicorn>=0.30.6
+prometheus-client>=0.17.0
+
 # Tests
 pytest>=8.0
+hypothesis>=6.0
+mypy>=1.11
+pyflakes>=4.0
