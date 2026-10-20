@@ -13,7 +13,7 @@ they forward or grant read access to their SMS, or an agent does it for them.
 
 ```
   raw SMS  ──▶  GATE  ──▶  LEDGER  ──▶  FEATURES  ──▶  SCORE
-              "real?"      rows        20 numbers     300-850 + reasons
+               "real?"      rows        27 numbers     300-850 + reasons
 ```
 
 ### 1. Gate - "is this message a real transaction?"
@@ -27,9 +27,9 @@ Three interchangeable implementations, all behind the same one-function interfac
 
 | implementation | where | why |
 |---|---|---|
-| rules | `parsing/parser.py` | zero dependencies, auditable, the baseline every model must beat |
+| rules | `parsing/rules.py` | zero dependencies, auditable, the baseline every model must beat |
 | TF-IDF + logistic regression | `models/tfidf.py` | char n-grams survive typos; cheap enough for a server |
-| hybrid | `models/tfidf.py` (`use_rules=True`) | same model, but the rule flags are fed in as extra tokens, so it can override a wrong rule |
+| hybrid | `models/tfidf.py` (`use_rules=True`) | same model, but the rule flags are fed in as extra tokens |
 | transformer | `models/transformer.py` | fine-tuned multilingual model; best on unseen wording, heaviest to serve |
 
 The hybrid deserves a note. The rules and the model disagree in two directions:
@@ -38,6 +38,11 @@ fires on a URL the rules miss. Feeding the rule flags in as tokens (`FLAG_asks_s
 `RULESCORE4`, `PARSED_TXN`) lets the learned model weigh them against the text instead
 of being bound by a hard threshold. In the unseen-scam-type test the plain TF-IDF model
 recalled 91% of scam types it had never seen, and the hybrid recalled 100%.
+
+**Resilience**: in production the gate is wrapped in a circuit breaker
+(`tshepo/resilience.py`). After consecutive failures it trips open and short-circuits
+straight to the zero-dependency rule gate, so a corrupt or slow model artefact never
+takes the whole service down. The breaker state is reported in `GET /health`.
 
 ### 2. Ledger - structure
 
@@ -51,10 +56,11 @@ not something to fabricate.
 
 ### 3. Features - cash flow
 
-`features/cashflow.py` turns a user's ledger into 20 numbers over a rolling 13-week
+`features/cashflow.py` turns a user's ledger into 27 numbers over a rolling 13-week
 window: income level and regularity, outflow ratio, savings rate, balance volatility
-and floor, loan repayment habit, payer diversity and concentration, and a ledger
-integrity share.
+and floor, loan repayment habit, payer diversity and concentration, ledger integrity,
+plus velocity/timing signals (txn per day, amount velocity, night/weekend share),
+round-amount share, fee burden and day-of-week regularity.
 
 **Ledger integrity** is the anti-fraud check: for each account, does the balance in
 message *n* equal the balance in message *n-1* plus or minus the amount and fee? A
@@ -91,7 +97,7 @@ held-out users' histories and comparing scores with and without the gate.
       -> report()                accuracy, scam recall, false-flag rate
     generator.build(credit_signal=True)
       -> extract_transactions()  gate + parser
-      -> build_features()        20 features per user
+      -> build_features()        27 features per user
       -> fit score models        AUC / KS on held-out users
       -> forgery test            does the gate + integrity check hold?
 
@@ -115,13 +121,17 @@ messages, and the score that matters is the one fitted on real repayment outcome
   artefacts you produced or audited.
 * A sliding-window rate limiter caps scoring calls per key (default 120/min).
 * Batches are capped at 200k records; per-user ledgers at 5k rows.
+* `tshepo.resilience.CircuitBreaker` trips after consecutive model failures and falls
+  back to the rule gate; state is exposed in `GET /health`.
 
 **Scalability**
 * `score_batch` processes users in bounded chunks with per-user ledger capping and
   progress logging, so memory stays flat as the user count grows.
 * `ScoreModel.predict_proba_batch` vectorises predictions across many feature dicts.
 * Regexes are compiled once at module load (no per-message recompilation).
+* `CircuitBreaker` prevents a repeatedly-failing model from hammering the service.
 
 **Health checks**
 * `tshepo.health.check_all` verifies the parser, features, scorecard and models dir
-  before deploying or in a readiness probe.
+  before deploying or in a readiness probe. `GET /health` also reports circuit-breaker
+  state and whether API-key auth is configured.
