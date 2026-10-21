@@ -34,7 +34,8 @@ from .graph import (CIRCULAR_SHARE_ALERT, INCOME_CONCENTRATION_ALERT,
                     graph_signals)
 
 FEATURES = [
-    "hist_days", "n_txn", "monthly_income", "income_weeks_active", "income_cv", "out_in_ratio",
+    "hist_days", "n_txn", "monthly_income", "income_weeks_active", "income_weeks_n", "income_cv",
+    "out_in_ratio",
     "net_savings_rate", "bal_mean", "bal_min", "bal_cv", "low_bal_share", "buffer_ratio",
     "n_loan_repay", "airtime_share", "withdrawal_share", "merchant_share",
     "n_unique_payers", "payer_diversity", "top_payer_share", "integrity",
@@ -55,6 +56,18 @@ FEATURES = [
 WEEKS = 13
 WINDOW_DAYS = WEEKS * 7
 
+
+def _window() -> tuple[int, int]:
+    """The scoring window as (weeks, days), read from the configuration.
+
+    The window is a product decision: it decides what a year of income
+    regularity means, how long a "history" is, and what a score is allowed to
+    claim. It is configurable so it can be changed deliberately and
+    re-validated, not so that it drifts.
+    """
+    days = int(get("SCORE_WINDOW_DAYS", WINDOW_DAYS))
+    return max(1, days // 7), max(1, days)
+
 # How far a balance may move beyond the stated amount before the link is
 # treated as broken rather than as an unprinted operator fee.
 FEE_TOL_RATE = 0.05
@@ -64,9 +77,11 @@ FEE_TOL_CAP = 15.0
 STATUS_SCORED = "scored"
 STATUS_REVIEW = "review"
 STATUS_INSUFFICIENT = "insufficient_data"
+STATUS_REJECTED = "rejected"
 DECISION_SCORED = "score"
 DECISION_REVIEW = "refer_manual_review"
 DECISION_INSUFFICIENT = "insufficient_data"
+DECISION_REJECT = "reject"
 
 #: How many transactions a window needs before the share of incoming
 #: transactions says something about the wallet rather than about its size.
@@ -74,6 +89,10 @@ CONCENTRATION_MIN_TXNS = 20
 #: The same guard for the circular-flow signal. Two payments to and from the
 #: same person is a favour, not a laundering scheme.
 CIRCULAR_MIN_TXNS = 10
+#: The evidence a high-confidence score needs, over and above the minimum.
+CONFIDENCE_HIGH_TXNS = 60
+CONFIDENCE_HIGH_DAYS = 90
+CONFIDENCE_HIGH_WEEKS = 12
 
 
 @dataclass
@@ -110,6 +129,22 @@ def _min_window_coverage() -> float:
 def _min_readable_share() -> float:
     """How much of the supplied history has to be readable to score on it."""
     return float(get("MIN_READABLE_SHARE", 0.2))
+
+
+def _min_transactions() -> int:
+    return int(get("MIN_TRANSACTIONS", 25))
+
+
+def _min_history_days() -> int:
+    return int(get("MIN_HISTORY_DAYS", 60))
+
+
+def _min_income_weeks() -> int:
+    return int(get("MIN_INCOME_WEEKS", 8))
+
+
+def _max_unread_share() -> float:
+    return float(get("MAX_UNREAD_SHARE", 0.4))
 
 
 def _fee_tolerance(amount) -> float:
@@ -210,7 +245,8 @@ def _row_kind(r) -> str:
 
 def build_features(rows, ledger: Optional[Ledger] = None,
                    history_span_days: Optional[int] = None) -> dict[str, float]:
-    """Cash-flow features for one user over a single 13-week window."""
+    """Cash-flow features for one user over a single window."""
+    weeks, window_days = _window()
     txns = list(rows) if ledger is None else list(ledger.transactions)
     updates = [] if ledger is None else list(ledger.balance_updates)
     f = dict.fromkeys(FEATURES, 0.0)
@@ -233,7 +269,7 @@ def build_features(rows, ledger: Optional[Ledger] = None,
     f["hist_days"] = float(span)
 
     t1 = dated[-1][1]
-    start = t1 - timedelta(days=WINDOW_DAYS)
+    start = t1 - timedelta(days=window_days)
     window = [(r, t) for r, t in dated if t >= start]
     f["n_txn"] = float(len(window))
     if not window:
@@ -242,9 +278,9 @@ def build_features(rows, ledger: Optional[Ledger] = None,
         return f
 
     covered = (window[-1][1] - window[0][1]).days
-    f["window_coverage"] = float(min(1.0, max(covered, 0) / WINDOW_DAYS))
+    f["window_coverage"] = float(min(1.0, max(covered, 0) / window_days))
 
-    wk = np.zeros(WEEKS)
+    wk = np.zeros(weeks)
     income = cash_in = outflow = 0.0
     payers: set[str] = set()
     n_inc = 0
@@ -265,7 +301,7 @@ def build_features(rows, ledger: Optional[Ledger] = None,
                 income += a
                 n_inc += 1
                 inc_amts.append(a)
-                wk[min(int((t - start).days // 7), WEEKS - 1)] += a
+                wk[min(int((t - start).days // 7), weeks - 1)] += a
                 payers.add(r.get("counterparty_phone") or r.get("counterparty_name") or f"anon-{n_inc}")
         else:
             out = a + fee
@@ -278,8 +314,9 @@ def build_features(rows, ledger: Optional[Ledger] = None,
                 if r.get("timestamp"):
                     loan_months.add(str(r["timestamp"])[:7])
 
-    f["monthly_income"] = income / (WINDOW_DAYS / 30)
+    f["monthly_income"] = income / (window_days / 30)
     f["income_weeks_active"] = float((wk > 0).mean())
+    f["income_weeks_n"] = float((wk > 0).sum())
     f["income_cv"] = float(wk.std() / wk.mean()) if wk.mean() > 0 else 3.0
     f["out_in_ratio"] = outflow / (income + cash_in + 1.0)
     f["net_savings_rate"] = float(np.clip((income + cash_in - outflow) / (income + cash_in + 1.0), -1, 1))
@@ -331,7 +368,7 @@ def build_features(rows, ledger: Optional[Ledger] = None,
     f["bal_mean"], f["bal_min"] = float(totals.mean()), float(totals.min())
     f["bal_cv"] = float(totals.std() / totals.mean()) if totals.mean() > 0 else 3.0
     f["low_bal_share"] = float((totals < 20).mean())
-    f["buffer_ratio"] = f["bal_mean"] / (outflow / (WINDOW_DAYS / 30) + 1.0)
+    f["buffer_ratio"] = f["bal_mean"] / (outflow / (window_days / 30) + 1.0)
 
     chain_rows = [r for r, _ in window] + [u for u in updates if u.get("timestamp")
                                            and _ts(u["timestamp"]) >= start]
@@ -370,25 +407,82 @@ def component_values(f):
     repayment = min(f["n_loan_repay"] / 4.0,
                     f.get("repay_months", 0.0) / 3.0,
                     f.get("repay_variety", 0.0) / 2.0)
+    _weeks, window_days = _window()
     return {
         "income_regularity": clip(0.6 * f["income_weeks_active"] + 0.4 * (1 - min(f["income_cv"], 2) / 2)),
         "cash_surplus": clip((f["net_savings_rate"] + 0.2) / 0.6),
         "balance_buffer": clip(0.7 * min(f["buffer_ratio"], 1.0) + 0.3 * (1 - f["low_bal_share"])),
         "repayment_habit": clip(repayment),
         "customer_base": clip(f["n_unique_payers"] / 10),
-        "history_depth": clip(f["hist_days"] / 90),
+        "history_depth": clip(f["hist_days"] / window_days),
     }
 
 
+#: What each component needs before it can say anything about the applicant.
+#: Below the line the component is *withheld*, not scored zero: "not enough
+#: evidence" must not look like "this applicant failed", and a withheld
+#: component must not drag the score down for something nobody measured.
+COMPONENT_EVIDENCE = {
+    "income_regularity": ("income-bearing weeks", 4),
+    "cash_surplus":      ("transactions", 10),
+    "balance_buffer":    ("transactions", 10),
+    "repayment_habit":   ("days of history", 60),
+    "customer_base":     ("transactions", 10),
+    "history_depth":     ("days of history", 60),
+}
+
+
+def component_evidence(f) -> dict[str, tuple[float, float]]:
+    """component -> (observed, required) for the evidence it needs."""
+    weeks = float(f.get("income_weeks_n", 0.0) or 0.0)
+    txns = float(f.get("n_txn", 0.0) or 0.0)
+    days = float(f.get("hist_days", 0.0) or 0.0)
+    return {
+        "income_regularity": (weeks, COMPONENT_EVIDENCE["income_regularity"][1]),
+        "cash_surplus":      (txns, COMPONENT_EVIDENCE["cash_surplus"][1]),
+        "balance_buffer":    (txns, COMPONENT_EVIDENCE["balance_buffer"][1]),
+        "repayment_habit":   (days, COMPONENT_EVIDENCE["repayment_habit"][1]),
+        "customer_base":     (txns, COMPONENT_EVIDENCE["customer_base"][1]),
+        "history_depth":     (days, COMPONENT_EVIDENCE["history_depth"][1]),
+    }
+
+
+def withheld_components(f) -> dict[str, str]:
+    """Components that cannot be scored from this history, and why."""
+    out: dict[str, str] = {}
+    for name, (observed, required) in component_evidence(f).items():
+        if observed < required:
+            label, need = COMPONENT_EVIDENCE[name]
+            out[name] = f"not enough evidence: {int(observed)} {label}, {int(need)} needed"
+    return out
+
+
 def scorecard(f):
+    """The transparent score.
+
+    Components with enough evidence are scored and weighted as usual. A
+    component without enough evidence is withheld and its weight is left out
+    of the denominator rather than counted as a zero, so a partly measured
+    applicant is not punished for the part nobody could see. When every
+    component is scored - the normal case for a file that passed the evidence
+    rules - this is exactly the old formula.
+    """
     vals = component_values(f)
-    pts = sum(COMPONENTS[k][0] * v for k, v in vals.items())  # 0..100
-    score = int(round(300 + 5.5 * pts))
-    gaps = sorted(((COMPONENTS[k][0] * (1 - v), k) for k, v in vals.items()), reverse=True)
-    strengths = sorted(((COMPONENTS[k][0] * v, k) for k, v in vals.items()), reverse=True)
-    return dict(score=score, components={k: round(v, 2) for k, v in vals.items()},
-                reasons_down=[COMPONENTS[k][1] for g, k in gaps[:3] if g > 3],
-                reasons_up=[k.replace("_", " ") for s, k in strengths[:2] if s > 10])
+    withheld = withheld_components(f)
+    scored = {k: v for k, v in vals.items() if k not in withheld}
+    pts_earned = sum(COMPONENTS[k][0] * v for k, v in scored.items())
+    pts_available = sum(COMPONENTS[k][0] for k in scored)
+    score = int(round(300 + 550 * (pts_earned / pts_available))) if pts_available else None
+    gaps = sorted(((COMPONENTS[k][0] * (1 - v), k) for k, v in scored.items()), reverse=True)
+    strengths = sorted(((COMPONENTS[k][0] * v, k) for k, v in scored.items()), reverse=True)
+    return dict(
+        score=score,
+        components={k: (round(v, 2) if k not in withheld else None) for k, v in vals.items()},
+        withheld=withheld,
+        provisional=bool(withheld),
+        reasons_down=[COMPONENTS[k][1] for g, k in gaps[:3] if g > 3],
+        reasons_up=[k.replace("_", " ") for s, k in strengths[:2] if s > 10],
+    )
 
 
 def band(score):
@@ -396,30 +490,138 @@ def band(score):
             else "Good" if score < 750 else "Very good")
 
 
+def evidence_summary(f, ledger: Optional[Ledger] = None) -> dict[str, Any]:
+    """What the score is standing on: how much history, how readable it is."""
+    stats = ledger.stats if ledger is not None else {}
+    messages = int(stats.get("messages", 0) or 0)
+    unread = int(stats.get("unread", 0) or 0)
+    return {
+        "transactions": int(f.get("n_txn", 0) or 0),
+        "history_days": int(f.get("hist_days", 0) or 0),
+        "income_weeks": int(f.get("income_weeks_n", 0) or 0),
+        "window_coverage": round(float(f.get("window_coverage", 0.0) or 0.0), 3),
+        "messages_supplied": messages,
+        "messages_unread": unread,
+        "readable_share": round((messages - unread) / messages, 3) if messages else None,
+    }
+
+
+def confidence_of(f) -> Optional[str]:
+    """How much the evidence behind a score is worth.
+
+    ``high`` - comfortably above the evidence rules; ``medium`` - the minimum
+    a score may be issued on; ``low`` - something was scored on thin data and
+    a human should look; ``None`` - there is nothing to be confident about.
+    """
+    txns = int(f.get("n_txn", 0) or 0)
+    days = int(f.get("hist_days", 0) or 0)
+    weeks = int(f.get("income_weeks_n", 0) or 0)
+    if txns == 0 and days == 0:
+        return None
+    if txns >= CONFIDENCE_HIGH_TXNS and days >= CONFIDENCE_HIGH_DAYS \
+            and weeks >= CONFIDENCE_HIGH_WEEKS:
+        return "high"
+    if txns >= _min_transactions() and days >= _min_history_days() \
+            and weeks >= _min_income_weeks():
+        return "medium"
+    return "low"
+
+
+def _missing_evidence(f, ledger: Optional[Ledger] = None) -> tuple[list[dict[str, Any]], int]:
+    """What is missing before a score can be issued, and how long to wait.
+
+    The second element is the number of days the applicant would have to wait
+    for their own history to grow into a score, estimated from the rate their
+    own messages arrive at.
+    """
+    _weeks, window_days = _window()
+    n_txn = int(f.get("n_txn", 0) or 0)
+    days = int(f.get("hist_days", 0) or 0)
+    income_weeks = int(f.get("income_weeks_n", 0) or 0)
+    coverage = float(f.get("window_coverage", 0.0) or 0.0)
+    missing: list[dict[str, Any]] = []
+    waits: list[int] = []
+
+    if n_txn < _min_transactions():
+        shortfall = _min_transactions() - n_txn
+        missing.append({"code": "transactions",
+                        "message": f"{n_txn} transaction(s) in the last {window_days} days, "
+                                   f"{_min_transactions()} are needed for a score",
+                        "shortfall": shortfall})
+        if n_txn > 0 and days > 0:
+            waits.append(int(-(-shortfall * days // n_txn)))  # ceil
+    if days < _min_history_days():
+        shortfall = _min_history_days() - days
+        missing.append({"code": "history_days",
+                        "message": f"{days} day(s) of history, {_min_history_days()} are needed "
+                                   f"for a score",
+                        "shortfall": shortfall})
+        waits.append(shortfall)
+    if income_weeks < _min_income_weeks():
+        shortfall = _min_income_weeks() - income_weeks
+        missing.append({"code": "income_weeks",
+                        "message": f"money came in during {income_weeks} week(s), "
+                                   f"{_min_income_weeks()} are needed to judge how regular it is",
+                        "shortfall": shortfall})
+        waits.append(shortfall * 7)
+    if coverage < _min_window_coverage():
+        missing.append({"code": "window_coverage",
+                        "message": f"the history covers {coverage:.0%} of the {window_days}-day "
+                                   f"window, {_min_window_coverage():.0%} is needed",
+                        "shortfall": 0})
+    return missing, (max(waits) if waits else 0)
+
+
 def assess(f, integrity_report_: Optional[dict[str, Any]] = None,
            ledger: Optional[Ledger] = None) -> dict[str, Any]:
     """Decide whether the data supports a lending decision.
 
-    Returns the status, the decision, and the reasons.
+    Four states, and the difference between them matters to the applicant:
 
-    * ``insufficient_data`` - there is not enough to score on: no readable
-      transactions, a history too short for the window, or messages dropped.
-    * ``review`` - the data exists but does not hang together: the balance
-      chain has breaks, so a human has to look before a decision is made.
+    * ``rejected`` - the export cannot be used: most of it could not be read.
+      The applicant has to export again; waiting will not help.
+    * ``insufficient_data`` - the export is readable but too thin to score on.
+      The applicant is told what is missing and when to come back.
+    * ``review`` - there is enough to score on, but something does not hang
+      together, so a human has to look before a decision is made.
     * ``scored`` - the data supports the score.
+
+    A score is only ever issued on the last two, and the decision is always
+    reported with the evidence behind it.
     """
+    rejected: list[str] = []
     insufficient: list[str] = []
     review: list[str] = []
     integrity = float(f.get("integrity", 1.0))
     coverage = float(f.get("window_coverage", 0.0))
     n_txn = int(f.get("n_txn", 0))
+    _weeks, window_days = _window()
 
-    if n_txn == 0:
+    unread = int(ledger.stats.get("unread", 0) or 0) if ledger is not None else 0
+    messages = int(ledger.stats.get("messages", 0) or 0) if ledger is not None else 0
+    unread_share = unread / max(messages, 1)
+
+    # ---- 1. the export cannot be used at all
+    if messages and unread_share >= _max_unread_share():
+        rejected.append(
+            f"{unread} of {messages} message(s) could not be read ({unread_share:.0%}); the export "
+            f"has to be exported again, from the phone's full message history")
+    if n_txn == 0 and messages:
         insufficient.append("no transactions could be read from the messages supplied")
-    if coverage < _min_window_coverage():
-        insufficient.append(
-            f"history covers only {coverage:.0%} of the {WINDOW_DAYS}-day window "
-            f"(minimum {_min_window_coverage():.0%})")
+
+    # ---- 2. readable, but too thin to score on
+    missing, wait_days = _missing_evidence(f, ledger)
+    for item in missing:
+        insufficient.append(item["message"])
+    if unread and unread_share < _max_unread_share():
+        if unread_share >= _min_readable_share():
+            insufficient.append(
+                f"{unread} of {messages} message(s) could not be read ({unread_share:.0%}); "
+                f"the history is incomplete")
+        else:
+            review.append(f"{unread} of {messages} message(s) could not be read")
+
+    # ---- 3. enough to score on, but it does not hang together
     if integrity < _min_integrity():
         review.append(
             f"balance chain holds for only {integrity:.0%} of links "
@@ -435,20 +637,6 @@ def assess(f, integrity_report_: Optional[dict[str, Any]] = None,
                 f"the export has a {gap_h:.0f} hour gap (around {integrity_report_.get('largest_gap_at')}); "
                 f"export the full message history to close it")
     if ledger is not None:
-        # Messages the parser could not read are the quietest way to lose
-        # money: the score still looks fine and the ledger is missing rows.
-        # They are counted, and a large enough share of them stops the score.
-        unread = int(ledger.stats.get("unread", 0) or 0)
-        messages = int(ledger.stats.get("messages", 0) or 0)
-        if unread:
-            share = unread / max(messages, 1)
-            if share >= _min_readable_share():
-                insufficient.append(
-                    f"{unread} of {messages} message(s) could not be read "
-                    f"({share:.0%}); the history is incomplete")
-            else:
-                review.append(
-                    f"{unread} of {messages} message(s) could not be read")
         unchained = int(ledger.stats.get("unchained", 0) or 0)
         if unchained:
             review.append(
@@ -478,13 +666,42 @@ def assess(f, integrity_report_: Optional[dict[str, Any]] = None,
     # by one employer is normal, and refusing to score it would exclude a
     # large part of the people this service exists for.
 
-    if insufficient:
+    if rejected:
+        status, decision = STATUS_REJECTED, DECISION_REJECT
+    elif insufficient:
         status, decision = STATUS_INSUFFICIENT, DECISION_INSUFFICIENT
     elif review:
         status, decision = STATUS_REVIEW, DECISION_REVIEW
     else:
         status, decision = STATUS_SCORED, DECISION_SCORED
-    return {"status": status, "decision": decision, "issues": insufficient + review}
+
+    retry = None
+    if status == STATUS_INSUFFICIENT and missing:
+        retry = {
+            "kind": "wait",
+            "after_days": wait_days,
+            "message": (f"a score needs {_min_transactions()} transactions, "
+                        f"{_min_history_days()} days of history and {_min_income_weeks()} weeks "
+                        f"with money in; this history is about {wait_days} day(s) short of that"),
+        }
+    elif status == STATUS_REJECTED:
+        retry = {
+            "kind": "reexport",
+            "after_days": 0,
+            "message": "export the full message history from the phone again; most of the last "
+                       "export could not be read",
+        }
+
+    return {
+        "status": status,
+        "decision": decision,
+        "issues": rejected + insufficient + review,
+        "rejected": rejected,
+        "missing": missing,
+        "retry": retry,
+        "evidence": evidence_summary(f, ledger),
+        "confidence": confidence_of(f),
+    }
 
 
 def make_passport(rows, user_label="applicant", pd_model_score=None, ledger: Optional[Ledger] = None,
@@ -509,12 +726,26 @@ def make_passport(rows, user_label="applicant", pd_model_score=None, ledger: Opt
         "repayment_months": int(f.get("repay_months", 0) or 0),
         "timestamp_mismatches": int(stats.get("timestamp_mismatch", 0) or 0),
     }
+    score = sc["score"]
+    # A score that was computed on evidence that does not meet the rules is
+    # never presented as a decision. The number is still there for a human
+    # reading the record, and the API withholds it from the applicant.
+    if quality["status"] in (STATUS_INSUFFICIENT, STATUS_REJECTED):
+        score = None
+    weeks_total, _days = _window()
     return {
         "applicant": user_label,
-        "score": sc["score"], "band": band(sc["score"]),
+        "score": score, "band": band(score) if score is not None else None,
         "model_pd_score": pd_model_score,
         "status": quality["status"],
         "decision": quality["decision"],
+        # How much the evidence behind the score is worth, and what it is
+        # standing on. A lender can set their own policy on top of this.
+        "score_confidence": quality["confidence"],
+        "score_provisional": sc["provisional"],
+        "evidence": quality["evidence"],
+        "missing": quality["missing"],
+        "retry": quality["retry"],
         # What this score is worth depends on where the messages came from.
         # Every score here rests on SMS the applicant supplied, and nothing in
         # the pipeline can prove those messages came from the operator.
@@ -534,9 +765,10 @@ def make_passport(rows, user_label="applicant", pd_model_score=None, ledger: Opt
         },
         "history_days": int(f["hist_days"]), "transactions_used": int(f["n_txn"]),
         "monthly_income_estimate": round(f["monthly_income"], 2),
-        "income_active_weeks": f"{round(f['income_weeks_active'] * WEEKS)}/{WEEKS}",
+        "income_active_weeks": f"{int(f['income_weeks_n'])}/{weeks_total}",
         "avg_balance": round(f["bal_mean"], 2), "loan_repayments_seen": int(f["n_loan_repay"]),
         "components": sc["components"],
+        "withheld_components": sc["withheld"],
         "reasons_down": sc["reasons_down"], "reasons_up": sc["reasons_up"],
         "data_integrity": "consistent" if integrity >= _min_integrity() else "REVIEW: balance chain has breaks",
         "integrity_share": round(integrity, 3),

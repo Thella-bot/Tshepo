@@ -131,6 +131,21 @@ def main():
         print(f"{kind:26}{np.mean(no_sh):>22.0f}{np.mean(sh):>19.0f}{honest:>12.0f}{flagged / 200:>16.0%}")
     print(f"(integrity flag = share of users whose balance chain breaks and are flagged for review; honest users flagged: {h_flag:.0%})")
 
+    # ---- The signals that do not need a template to be beaten.
+    print("\nShape signals on the same forged histories (the gate cannot help here):")
+    for kind, skilled in [("naive (random sender)", False), ("skilled (spoofed MPESA)", True)]:
+        conc, circ = [], []
+        for i in te[:200]:
+            base = recs_by_user[uids[i]]
+            mixed = sorted(base + forge(rng, base, 12, skilled), key=lambda r: r["received_at"])
+            f = build_features(extract_transactions(mixed, label_fn=label_fn))
+            conc.append(f["income_concentration"])
+            circ.append(f["circular_share"])
+        print(f"  {kind:26} incoming share {np.mean(conc):.0%}   circular share {np.mean(circ):.0%}")
+    honest_conc = np.mean([build_features(extract_transactions(recs_by_user[uids[i]], label_fn=label_fn))
+                            ["income_concentration"] for i in te[:200]])
+    print(f"  {'honest users':26} incoming share {honest_conc:.0%}")
+
     # ---- Example passport
     i = te[0]
     rows = extract_transactions(recs_by_user[uids[i]], label_fn=label_fn)

@@ -57,6 +57,23 @@ MIN_INTEGRITY: float = float(os.environ.get("TSHEPO_MIN_INTEGRITY", "0.9"))
 MIN_WINDOW_COVERAGE: float = float(os.environ.get("TSHEPO_MIN_WINDOW_COVERAGE", "0.25"))
 # Withhold the numeric score whenever the passport is not "scored".
 WITHHOLD_SCORE: bool = os.environ.get("TSHEPO_WITHHOLD_SCORE", "1") == "1"
+
+# --- how much evidence a score needs before it is issued ------------------------
+# These are measured, not guessed. On held-out synthetic users the scorecard's
+# AUC is 0.50 for histories of 15-25 transactions (a coin flip) and 0.73 for
+# 25-40, so a score is only issued above the point where the score says
+# something. See docs/ARCHITECTURE.md, "The evidence contract".
+MIN_TRANSACTIONS: int = int(os.environ.get("TSHEPO_MIN_TRANSACTIONS", "25"))
+MIN_HISTORY_DAYS: int = int(os.environ.get("TSHEPO_MIN_HISTORY_DAYS", "60"))
+MIN_INCOME_WEEKS: int = int(os.environ.get("TSHEPO_MIN_INCOME_WEEKS", "8"))
+# Share of the export that could not be read at all. Above this the export is
+# unusable and the applicant is asked to export again; between
+# MIN_READABLE_SHARE and this, the history is simply too thin.
+MAX_UNREAD_SHARE: float = float(os.environ.get("TSHEPO_MAX_UNREAD_SHARE", "0.40"))
+# The window the score is computed over. 91 days is 13 weeks, which is what
+# the income-regularity component needs and what a typical loan decision cycle
+# allows. Changing it changes every score, so it is a decision, not a default.
+SCORE_WINDOW_DAYS: int = int(os.environ.get("TSHEPO_SCORE_WINDOW_DAYS", "91"))
 # Serve a score model that was fitted on synthetic outcomes. Off by default:
 # the shipped model is fitted on synthetic labels and proves nothing about
 # real repayment behaviour.

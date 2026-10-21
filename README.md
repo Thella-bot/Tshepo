@@ -42,6 +42,8 @@ hybrid that also reads the rule flags), and a fine-tuned multilingual transforme
         parser.py          compatibility shim (re-exports fields + rules)
       features/
         cashflow.py        27 cash-flow features, balance-chain integrity, transparent scorecard
+        graph.py           counterparty graph: money that comes back out, wallet shape
+      antiabuse.py         message fingerprints: a history used twice is one history
       models/
         tfidf.py           TF-IDF (char+word) + logistic regression, and the hybrid variant
         transformer.py     fine-tuned multilingual transformer, same interface as tfidf
@@ -230,6 +232,40 @@ drives both behaviour and outcome). The AUC proves the pipeline runs end to end,
 that the score predicts real defaults. Scorecard weights are hand-set.
 
 See `docs/ARCHITECTURE.md` for how the layers fit together.
+
+## What the score cannot know
+
+The applicant supplies the messages. The parser can tell what a message says; nothing
+in the pipeline can prove the operator sent it. Every passport therefore carries
+`"verification": "sms_unverified"` and a `fraud_signals` block, and a score that
+rests on an SMS history is a claim about the applicant's phone, not a fact about
+their finances.
+
+An applicant who controls the phone can, at minimum:
+
+* write any message they like into the export, or post them through the API under
+  a consent they issue themselves - the score is computed from the text, and a
+  fabricated history that is internally consistent scores like a real one;
+* backdate `received_at` to stretch the history and to move income into the weeks
+  the scorecard rewards;
+* delete the messages that look bad (a failed transaction leaves the balance
+  untouched, so the balance chain cannot see the deletion);
+* move money between their own accounts, so that ten wallets look like ten clients.
+
+What the system does about it, from inside the data:
+
+| signal | what it catches |
+|---|---|
+| counterparty graph (`features/graph.py`) | money that arrives from an account and goes back to the same account |
+| wallet shape | a wallet where almost every transaction is incoming, which is not a wallet that earns |
+| repayment corroboration | a repayment habit that needs several months and a changing amount before it earns marks |
+| timestamp cross-check | a message whose printed timestamp disagrees with the timestamp the export recorded for it |
+| message fingerprints (`antiabuse.py`) | one history submitted by two applicants |
+| balance-chain continuity | messages that were removed from the middle of the history |
+
+Every one of these is a speed bump, not a wall: a determined applicant can write a
+history that satisfies all of them. The defences that cannot be fooled from inside
+the data are external - see the provenance question in `docs/ARCHITECTURE.md`.
 
 ## Real data (phone exports)
 

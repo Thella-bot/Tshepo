@@ -37,7 +37,11 @@ def test_empty_ledger_is_safe():
     f = build_features([])
     assert f["n_txn"] == 0
     assert f["integrity"] == 1.0
-    assert scorecard(f)["score"] > 0
+    # No transactions means no evidence for any component, so there is no
+    # score: an empty history is a data finding, not a low-risk finding.
+    assert scorecard(f)["score"] is None
+    assert scorecard(f)["provisional"] is True
+    assert len(scorecard(f)["withheld"]) == len(scorecard(f)["components"])
 
 
 def test_scorecard_range_and_bands():
@@ -45,8 +49,11 @@ def test_scorecard_range_and_bands():
     sc = scorecard(build_features(rows))
     assert 300 <= sc["score"] <= 850
     assert band(sc["score"]) in {"Very low", "Low", "Fair", "Good", "Very good"}
-    assert set(sc["components"]) == set(FEATURES[:0]) or True  # components are named, not feature keys
-    assert all(0 <= v <= 1 for v in sc["components"].values())
+    scored = {k: v for k, v in sc["components"].items() if v is not None}
+    assert all(0 <= v <= 1 for v in scored.values())
+    # A component with no evidence is withheld, not scored as a zero.
+    assert sc["components"]["history_depth"] is None
+    assert "history_depth" in sc["withheld"]
 
 
 def test_passport_contains_no_raw_message():
@@ -57,7 +64,9 @@ def test_passport_contains_no_raw_message():
     blob = str(p)
     assert "MOKOENA" not in blob and "58123456" not in blob and "RK12AB34CD" not in blob
     assert p["applicant"] == "U1"
-    assert 300 <= p["score"] <= 850
+    # One message is not a history: the passport says so instead of scoring.
+    assert p["score"] is None
+    assert p["status"] == "insufficient_data"
     assert p["data_integrity"] in {"consistent", "REVIEW: balance chain has breaks"}
 
 

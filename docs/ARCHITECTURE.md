@@ -101,6 +101,79 @@ held-out users' histories and comparing scores with and without the gate.
       -> fit score models        AUC / KS on held-out users
       -> forgery test            does the gate + integrity check hold?
 
+## The fraud problem, stated honestly
+
+The applicant holds the phone. Every message Tshepo reads arrives through the
+applicant, and the pipeline has no way to tell an operator's alert from a
+well-written forgery. That is a property of the product, not a bug: the whole
+point is that no bank integration is needed.
+
+The measured consequence, from the red-team harness in `tests/test_antifraud.py`:
+a fabricated 90-day history that is internally consistent reaches **849 of the
+maximum 850**, passes every data-quality gate (balance chain 100%, coverage 99%,
+no unread messages, no gap over 24 hours) and is issued as `status: scored` over
+the API with nothing but a self-issued consent token. The honest EcoCash export
+scores 523 on the same pipeline.
+
+So the design answer is not "detect the forgery" - that is not possible from
+inside the data. It is three things:
+
+1. **Never let a number stand alone.** Every passport carries
+   `verification: sms_unverified` and a `fraud_signals` block, so the lender
+   sees what the number rests on.
+2. **Catch the attacks that leave a trace.** Some manoeuvres cannot be
+   perfectly imitated because they depend on relationships rather than on
+   wording: money that goes out to the same accounts it came from, a history
+   used by two applicants, a message whose timestamp disagrees with the export,
+   a repayment that never recurs.
+3. **Ask for provenance the applicant cannot produce.** The signal that
+   forgery cannot reach is an independent one.
+
+## Detection signals, and what each one is worth
+
+| signal | where | catches | defeated by |
+|---|---|---|---|
+| counterparty graph | `features/graph.py` | money that arrives from an account and goes back to the same account - circular flow, a laundering pattern that needs no forgery at all | paying through intermediate accounts the applicant does not control |
+| wallet shape | `features/cashflow.py` | a wallet where nearly every transaction is incoming | adding synthetic outgoing transactions |
+| repayment corroboration | `features/cashflow.py` | a repayment habit that does not recur over months or never changes amount | spacing the forgeries across months with different amounts |
+| timestamp cross-check | `parsing/rules.py` | a message edited after the export was written | editing both timestamps together |
+| message fingerprints | `antiabuse.py`, `store.py` | one history submitted by two applicants | changing one message in the copy |
+| balance-chain continuity | `features/cashflow.py` | messages deleted from the middle of the history | deleting only messages that did not move the balance |
+| gate (rules / TF-IDF / hybrid) | `parsing/rules.py` | a forgery that does not look like the operator's template | copying the operator's real template |
+
+Thresholds are set clear of the real population on purpose: on the real EcoCash
+and M-Pesa exports and on 200 synthetic users the circular share never exceeded
+0.15 and the incoming share never exceeded 0.62, while a circular-flow attack
+measures 1.00 and a fabrication 0.86. The signals are review triggers, not
+score changes, so a false positive costs a human's time and never a decision.
+
+## Provenance without a bank integration
+
+Without a bank, the service cannot prove a message is genuine. It can only make
+the applicant's claim harder to fake, and it can ask for evidence the applicant
+cannot manufacture alone:
+
+* **A live challenge through the operator.** The service sends a one-time code
+  to the applicant's wallet through the operator's USSD/app channel and asks
+  for it in the portal. The applicant cannot pre-compute the code, so a forged
+  history no longer proves control of a phone; it proves control of a message
+  inbox. This needs an operator partnership, not a bank.
+* **A signed export.** Some operators already put an export signature or a
+  verification code in the export. Where it exists, verify it; where it does
+  not, record that it does not.
+* **Two-channel agreement.** Require the export to be corroborated by something
+  the applicant cannot edit in one place: the phone number of the sender for
+  every message, a second device or a second operator for the same period, or
+  an employer/payroll statement for the income the score credits.
+* **Time-boxed consent and an upload token.** A consent that is bound to the
+  applicant's declared phone number, expires, and can only be used once, removes
+  the "score this history for many people" attack and the replay attack.
+* **Device attestation where the platform offers it.** Play Integrity and
+  Apple App Attest attest that the app running on the phone is the real one
+  and that the SMS database was read in place, not pasted. It does not prove
+  the messages are genuine, but it removes the "edit the database" attack
+  without requiring the applicant to install anything unusual.
+
 ## What is real and what is not
 
 Real: the parser, the rule engine, the feature engineering, the scorecard, the
