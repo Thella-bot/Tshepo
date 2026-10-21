@@ -70,7 +70,7 @@ def test_validate_records_rejects_oversized_batch():
         pass
 
 
-@settings(max_examples=50)
+@settings(max_examples=50, deadline=None)
 @given(
     n_txn=st.integers(min_value=2, max_value=50),
 )

@@ -38,12 +38,36 @@ SENDER_OP = {"MPESA": "mpesa", "M-PESA": "mpesa", "ECOCASH": "ecocash", "BANKA":
 SENDER_TYPO = {"LPESA": "MPESA"}
 # Operator short codes (Lesotho). EcoCash authentic sender is 199; M-Pesa uses M-Pesa.
 SHORT_CODES = {"199": "ecocash"}
-CUR = r"(?<![A-Za-z0-9])(?:LSL\s?|M)\s*"
-# Allow operator spacing ("M 102.07") and stray artifacts ("M1.36.00").
-NUM = r"((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?(?:\.\d{2})?)"
-AMT_RE = re.compile(CUR + NUM, re.I)
-BAL_RE = re.compile(rf"bal(?:ance)?\s*(?:is|:)?\s*{CUR}{NUM}", re.I)
-FEE_RE = re.compile(rf"(?:transaction\s+cost|fee|charge)s?(?:\s+of)?\W{{0,4}}{CUR}{NUM}", re.I)
+
+# --- money tokens -----------------------------------------------------------
+# The operators write amounts as "M100.00", "M 100.00", "LSL100.00" and "R500.00".
+# When the operator changes a template the currency can move to the other side
+# ("100.00 M") or disappear altogether, so a balance or a fee may be written
+# without one. The currency is therefore optional where a strong word anchors
+# the figure (balance, fee) and required for the transaction amount unless a
+# money verb sits right next to the digits.
+_CUR = r"(?:LSL|M|R)"
+_CUR_PRE = rf"(?<![A-Za-z0-9]){_CUR}\s*"
+_CUR_POST = rf"\s*{_CUR}(?![A-Za-z0-9])"
+# 1,500.00 / 1 500.00 / 1.500,00 / 1.36.00 (operator artefact) / 1500 / 100,50
+# Grouped: the alternation must not escape into the pattern it is used in.
+_NUM = (r"(?:\d{1,3}(?:[,\u00a0\u202f ]\d{3})+(?:[.,]\d{1,2})?"
+        r"|\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?"
+        r"|\d+\.\d{1,2}\.\d{2}"
+        r"|\d+(?:[.,]\d{1,2})?)")
+AMT_RE = re.compile(_CUR_PRE + f"(-?{_NUM})", re.I)
+AMT_SUFFIX_RE = re.compile(f"(-?{_NUM}){_CUR_POST}", re.I)
+BAL_RE = re.compile(rf"(?:bal(?:ance)?|boemong\s+ba\s+hae|balanse(?:\s+ea\s+hao)?)"
+                    rf"\s*(?:is|ke|:)?\s*(?:{_CUR}\s*)?(-?{_NUM})", re.I)
+FEE_RE = re.compile(rf"(?:transaction\s+cost|fee|charge)s?(?:\s+of)?\W{{0,4}}"
+                    rf"(?:{_CUR}\s*)?(-?{_NUM})(?!/)", re.I)
+# A bare number is only money when a money word sits right next to it. The
+# separator may not cross a "/", so a date is never read as an amount.
+_BARE_AMT_RE = re.compile(
+    rf"(?:received|paid|sent|bought|credited|debited|withdrawn|withdraw|cash\s?in"
+    rf"|amount\s+of|total\s+of|value\s+of)[^0-9/]{{0,8}}?(-?{_NUM})(?!/)", re.I)
+_BARE_AMT_REV_RE = re.compile(
+    rf"(-?{_NUM})(?!/)\s*(?:received|paid|sent|bought|credited|debited|withdrawn)", re.I)
 PHONE_RE = re.compile(r"(?<![A-Za-z0-9])(?:\+?266)?([56]\d{7})(?![A-Za-z0-9])")
 NAME = r"[A-Za-z][A-Za-z .'\-]{1,48}?"
 NAME_A = re.compile(
@@ -66,7 +90,8 @@ _REFERENCE_PATTERNS = [
 _REFERENCE_RES = [re.compile(p, re.I) for p in _REFERENCE_PATTERNS]
 MERCHANT_ID = re.compile(rf"(?<![A-Za-z0-9])(\d{{4,8}})\s*-\s*({NAME})(?=\s*(?:Approval|for\b|Wallet|New|\.|,|$))", re.I)
 IN_RE = re.compile(r"received|credited|deposit|cash\s?in|amohetse", re.I)
-OUT_RE = re.compile(r"\bsent\b|\bpaid\b|bought|debited|withdr|purchase|cash\s?out|cashout", re.I)
+OUT_RE = re.compile(r"\bsent\b|\bpaid\b|bought|debited|withdr|purchase|cash\s?out|cashout|"
+                     r"\bromela\b", re.I)
 MONTHS = {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split())}
 
 # --- wallet-direction rules that plain keywords get wrong ---------------------
@@ -75,14 +100,32 @@ MONTHS = {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oc
 GIVE_CASH_RE = re.compile(r"\bgive\b.{0,60}?\bcash\b", re.I)
 # "You have received M26.00 from <agent> for Withdrawal" also credits the wallet.
 FOR_WITHDRAWAL_RE = re.compile(r"\bfor\s+withdraw(?:al|al\s+fee)\b", re.I)
-# A transaction the operator refused. Not income, not noise: a behavioural signal.
+# "You have received M300.00 and withdrawal fee of M6.32 from <agent>" is the
+# same event written the other way round: the customer took cash out, so the
+# wallet is credited. This is cash in, not income.
+WITHDRAWAL_FEE_RE = re.compile(r"\bwithdrawal\s+fee\b", re.I)
+# A data/airtime bundle bought from a bundle seller: "5 MB @ M10.00".
+BUNDLE_RE = re.compile(r"\b(?:mb|minutes|bundle|combo|data)\b[^.]{0,40}?@\s*"
+                       rf"(?:{_CUR}\s*)?{_NUM}", re.I)
+# Money that leaves the wallet, whichever way the operator words it.
+LOAN_REPAY_RE = re.compile(r"\bloan\s+(?:repayment|payment)\b|\brepayments?\b", re.I)
+BILL_PAY_RE = re.compile(r"\bbill\s+payment\b|\bpayment\s+of\b|\bpayment\s+for\b", re.I)
+# The operator gave the money back, or the customer asked for it back. Either
+# way no new money moved, so this is not a transaction.
+REVERSED_RE = re.compile(r"\b(?:reversed|reversal|refunded|re-funded|cancelled|canceled)\b", re.I)
+RETURN_REQUEST_RE = re.compile(r"\bsend\s+(?:it\s+)?back\b|\bsend\s+back\b|\bromela\s+hape\b", re.I)
+MISTAKE_RE = re.compile(r"\bby\s+mistake\b|\bka\s+phoso\b|\bin\s+error\b", re.I)
+# A transaction the operator refused, reversed or cancelled. Not income, not
+# noise: a behavioural signal.
 FAILED_RE = re.compile(
     r"\bis\s+failed\b|unable\s+to\s+process|is\s+insufficient\s+for\s+the\s+transaction|"
-    r"transaction\s+is\s+failed|dormant\s+state", re.I)
+    r"transaction\s+is\s+failed|transaction\s+failed|dormant\s+state|"
+    r"^failed\b|\bfailed\.|\breversed\b|\breversal\b|\brefunded\b|\bcancell?ed\b", re.I)
 # "Your balance is M247.23" - a balance restatement, not a transaction.
+# "Balanse ea hao" / "Boemong ba hae" are the Sesotho for the same thing.
 BALANCE_ONLY_RE = re.compile(
-    r"\b(?:your\s+|new\s+|m-?pesa\s+|wallet\s+)?(?:available\s+)?balance\s+is\b|\bavail(?:able)?\s+bal\b", re.I)
-# An airtime or data balance is not a wallet balance and must not re-anchor the chain.
+    r"\b(?:your\s+|new\s+|m-?pesa\s+|wallet\s+)?(?:available\s+)?balance\s+is\b|\bavail(?:able)?\s+bal\b|"
+    r"\bbalanse\s+ea\s+hao\b|\bboemong\s+ba\s+hae\b", re.I)# An airtime or data balance is not a wallet balance and must not re-anchor the chain.
 NOT_WALLET_BALANCE_RE = re.compile(
     r"\b(?:airtime|data|sms|voice|bundle|minutes?|credit|loan|debt|interest)\s+balance\b", re.I)
 
@@ -135,6 +178,41 @@ def strip_marketing(text: str) -> str:
     return _MARKETING_RE.sub(" ", text)
 
 
+# The header a second operator alert starts with. A phone export can write two
+# alerts as one line, and reading only the first one silently loses a
+# transaction, so the body is split on these.
+_ALERT_HEAD_RE = re.compile(r"(?:EcoCash\s*:|Ecocash\s*:|Transact\s+ID\s|M-Pesa\s*:)", re.I)
+
+
+def split_alerts(body: str) -> list[str]:
+    """Split a body that holds more than one operator alert.
+
+    "New wallet balance: M 102.07.EcoCash: CashOut Confirmation: M 20 ..."
+    is two alerts, not one. The second one is a real withdrawal, and reading
+    only the first half loses it from the ledger without a word about it.
+    """
+    text = " ".join(str(body or "").split())
+    if not text:
+        return []
+    parts: list[str] = []
+    last = 0
+    for m in _ALERT_HEAD_RE.finditer(text):
+        start = m.start()
+        if start == 0:
+            continue
+        prev = text[start - 1]
+        if prev not in ".!?;:,)" and not prev.isspace():
+            continue
+        chunk = text[last:start].strip()
+        if chunk:
+            parts.append(chunk)
+        last = start
+    tail = text[last:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
 def _is_operator_name(name: Optional[str]) -> bool:
     if not name:
         return False
@@ -176,13 +254,33 @@ def _infer_direction(text: str, low: str) -> Optional[str]:
     """
     if GIVE_CASH_RE.search(text):
         return "in"
-    if FOR_WITHDRAWAL_RE.search(text):
+    if FOR_WITHDRAWAL_RE.search(text) or WITHDRAWAL_FEE_RE.search(text):
         return "in"
+    if LOAN_REPAY_RE.search(low):
+        return "out"
+    if BILL_PAY_RE.search(low):
+        return "out"
+    if BUNDLE_RE.search(text):
+        return "out"
     if IN_RE.search(low):
         return "in"
     if OUT_RE.search(low):
         return "out"
     return None
+
+
+def _no_money_moved(text: str, low: str) -> bool:
+    """True when the message says the money did not move.
+
+    An operator reversal, a cancellation and a "send it back" request all look
+    like a transaction to a keyword parser, and all three would otherwise be
+    booked as income.
+    """
+    if REVERSED_RE.search(low) or RETURN_REQUEST_RE.search(low):
+        return True
+    if MISTAKE_RE.search(low) and RETURN_REQUEST_RE.search(low):
+        return True
+    return False
 
 
 def _transfer_direction(text: str) -> Optional[str]:
@@ -225,10 +323,47 @@ class Parsed:
 
 
 def _num(s: str) -> float:
-    """Parse a number, tolerating stray artifacts like 'M1.36.00' (first decimal pair)."""
-    s = s.replace(",", "")
-    m = re.match(r"\d+(?:\.\d{1,2})?", s)
-    return float(m.group(0)) if m else float(s)
+    """Parse a money token into a float.
+
+    Handles the formats the operators and the phones actually produce:
+    ``1,500.00`` (comma thousands), ``1 500.00`` (space thousands),
+    ``1.500,00`` (European), ``100,50`` (European decimal comma),
+    ``1.36.00`` (a doubled decimal in one real EcoCash alert) and a leading
+    minus sign. The old version read "M1 500.00" as 1.0 and "M100,50" as
+    100.0, which is a silent 1000x error on a real transaction.
+    """
+    if s is None:
+        return 0.0
+    s = str(s).strip()
+    sign = 1.0
+    if s.startswith("-"):
+        sign, s = -1.0, s[1:]
+    elif s.startswith("+"):
+        s = s[1:]
+    s = s.replace("\u00a0", "").replace("\u202f", "").replace(" ", "")
+    if "." in s and "," in s:
+        # the right-most separator is the decimal one
+        if s.rfind(".") > s.rfind(","):
+            s = s.replace(",", "")
+        else:
+            s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        if s.count(",") > 1:
+            s = s.replace(",", "")
+        else:
+            head, _, tail = s.rpartition(",")
+            s = head + tail if (len(tail) == 3 and head) else head + "." + tail
+    elif s.count(".") > 1:
+        # 1.36.00 -> 1.36 (the operator doubled a decimal point)
+        parts = s.split(".")
+        s = parts[0] + "." + (parts[1][:2] or "0")
+    m = re.match(r"\d+(?:\.\d+)?", s)
+    if not m:
+        return 0.0
+    try:
+        return sign * float(m.group(0))
+    except ValueError:
+        return 0.0
 
 
 def _timestamp(text: str) -> Optional[str]:
@@ -255,44 +390,131 @@ def _timestamp(text: str) -> Optional[str]:
     return None
 
 
+# "Cash In Confirmation" / "Cash in of M100 received from agent ..." - the
+# customer handed cash to an agent and the agent credited the wallet.
+CASH_IN_RE = re.compile(r"\bcash\s?in\b", re.I)
+# "from 37810-Sima Communication" - the payer is an agent (a numbered till),
+# not a person paying the customer.
+AGENT_PAYOUT_RE = re.compile(r"from\s+\d{4,11}\s*[-–]\s*[A-Za-z]", re.I)
+# A merchant payment, as opposed to paying a person. "You have paid M100 to
+# THABO 58123456" is a transfer; "You have paid Nkalime of M13.29" is a
+# merchant payment, and so is "for Merchant Payment" and "POS PURCHASE".
+MERCHANT_RE = re.compile(
+    r"for\s+merchant\s+payment|for\s+0\b|\bpos\b|purchase|"
+    r"paid\s+[A-Za-z][\w.'\- ]{0,40}?\s+of\s+(?:LSL|M|R)\s*[\d,.]+|cash\s?to", re.I)
+PAID_TO_RE = re.compile(r"\bpaid\s+to\s+", re.I)
+
+
+def _is_merchant_payment(text: str) -> bool:
+    """Is this a payment to a business rather than to a person?
+
+    The operators do not say "merchant" in most of their alerts, so the
+    counterparty is the clue: a payment to a shop has no phone number after
+    the name, a payment to a person does.
+    """
+    if MERCHANT_RE.search(text):
+        return True
+    m = PAID_TO_RE.search(text)
+    if m and not PHONE_RE.search(text[m.end():m.end() + 40]):
+        return True
+    return False
+
+
 def _category(text: str, low: str, direction: Optional[str]) -> Optional[str]:
     """Transaction category.
 
     For incoming money the split between "deposit" (cash converted to e-money,
     not earned) and "transfer" (earned, from a named third party) drives the
-    income features, so it has to match the generator's own labels: the
-    synthetic "transfer" template is the EcoCash "Cash In Confirmation" line,
-    and the synthetic "deposit" template always says "deposit" or "agent".
+    income features. Money that arrives from an agent or through a "Cash In"
+    is the customer's own cash coming back in: counting it as income is the
+    single most expensive mistake this parser can make, because in the real
+    EcoCash export the agent cash-in is the largest incoming category.
 
     Incoming rows only ever carry an inflow category; outflow categories
     ("airtime", "withdrawal", "merchant") on an incoming row are a parsing
     artefact of the operator's wording, not a fact about the money.
     """
+    if LOAN_REPAY_RE.search(low):
+        return "loan_repayment"
+    if BILL_PAY_RE.search(low):
+        return "bill"
     if direction == "in":
-        if GIVE_CASH_RE.search(text) or FOR_WITHDRAWAL_RE.search(text):
+        if GIVE_CASH_RE.search(text) or FOR_WITHDRAWAL_RE.search(text) \
+                or WITHDRAWAL_FEE_RE.search(text):
             return "deposit"
-        if re.search(r"deposit|cash\s?in", low) and not re.search(r"cash\s?in\s+confirmation", low):
+        if CASH_IN_RE.search(low):
             return "deposit"
-        if re.search(r"\bfrom\s+agent\b", low):
+        if re.search(r"\bdeposit\b", low):
+            return "deposit"
+        if AGENT_PAYOUT_RE.search(text):
             return "deposit"
         return "transfer"
-    if re.search(r"loan|repay", low):
-        return "loan_repayment"
     if re.search(r"cash\s?out|cashout", low):
         return "withdrawal"
     if "withdr" in low and not FOR_WITHDRAWAL_RE.search(text):
         return "withdrawal"
-    if "airtime" in low:
+    if "airtime" in low or BUNDLE_RE.search(text):
         return "airtime"
     if "bill" in low:
         return "bill"
-    if re.search(r"\bpaid\b|\bpos\b|purchase|cash\s?to", low):
+    # A merchant payment is not just "paid": paying a person is a transfer.
+    # The operators mark a merchant payment with "for Merchant Payment", with
+    # the item code ("for 0"), with "POS", or with the "<business> of M<x>"
+    # wording M-Pesa uses.
+    if _is_merchant_payment(text):
         return "merchant"
     return "transfer"
 
 
+def _find_amount(masked: str) -> Optional[float]:
+    """The transaction amount: the first money figure that is not the balance
+    or the fee.
+
+    Tried in order of how much the operator's wording anchors it: a currency
+    in front of the digits, a currency behind them, then a bare number next
+    to a money word. A bare number is only accepted when a money word sits
+    right next to it, so a reference or a phone number is never read as money.
+    """
+    m = AMT_RE.search(masked)
+    if m:
+        return _num(m.group(1))
+    m = AMT_SUFFIX_RE.search(masked)
+    if m:
+        return _num(m.group(1))
+    m = _BARE_AMT_REV_RE.search(masked) or _BARE_AMT_RE.search(masked)
+    if m:
+        return _num(m.group(1))
+    return None
+
+
 def parse(body: str, sender: Optional[str] = None) -> Parsed:
-    """Extract structured fields from an SMS. Returns a :class:`Parsed` object."""
+    """Extract structured fields from an SMS. Returns a :class:`Parsed` object.
+
+    A body that holds more than one operator alert is split (see
+    :func:`split_alerts`) and the first alert is returned here; callers that
+    need every alert in the body use :func:`parse_all`.
+    """
+    parts = split_alerts(body)
+    return _parse_one(parts[0] if parts else "", sender)
+
+
+def parse_all(body: str, sender: Optional[str] = None) -> list[Parsed]:
+    """Parse every operator alert in a body.
+
+    Phones sometimes concatenate two alerts into one message (an export
+    writes them as one line). Reading only the first one silently loses a
+    transaction, which is worse than dropping the message: the money is
+    missing from the ledger and nothing says so.
+    """
+    out = []
+    for part in split_alerts(body):
+        p = _parse_one(part, sender)
+        if p.kind != "other" or p.amount is not None or p.balance is not None:
+            out.append(p)
+    return out or [_parse_one("", sender)]
+
+
+def _parse_one(body: str, sender: Optional[str] = None) -> Parsed:
     raw = " ".join(body.split())
     text = strip_marketing(raw)
     low = text.lower()
@@ -318,14 +540,18 @@ def parse(body: str, sender: Optional[str] = None) -> Parsed:
     for m in (bal, fee):
         if m:
             masked = masked[:m.start()] + " " * (m.end() - m.start()) + masked[m.end():]
-    amt = AMT_RE.search(masked)
     p.balance = _num(bal.group(1)) if bal else None
     p.fee = _num(fee.group(1)) if fee else None
-    p.amount = _num(amt.group(1)) if amt else None
+    p.amount = _find_amount(masked)
 
     p.direction = _infer_direction(text, low)
     if p.direction is None:
         p.direction = _transfer_direction(text)
+
+    if p.direction is not None and _no_money_moved(text, low):
+        # A reversal, a cancellation or a "send it back" request: no money
+        # moved, so this is not an inflow and not an outflow.
+        p.direction = None
 
     p.category = _category(text, low, p.direction)
 
@@ -356,7 +582,12 @@ def parse(body: str, sender: Optional[str] = None) -> Parsed:
                 p.category = "deposit"
 
     p.timestamp = _timestamp(text)
-    p.is_transaction = bool(p.operator and p.amount is not None and p.direction and p.balance is not None)
+    # A transaction needs an amount and a direction. The balance is what makes
+    # it checkable against the rest of the history, not what makes it a
+    # transaction, so an alert that the operator truncated (or wrote in a new
+    # template without a balance) is still a transaction - it just cannot be
+    # chained. A missing balance is reported, never silently ignored.
+    p.is_transaction = bool(p.operator and p.amount is not None and p.direction)
     p.is_balance_update = bool(
         not p.is_transaction and p.operator and p.balance is not None
         and p.amount is None and BALANCE_ONLY_RE.search(text)
@@ -376,5 +607,5 @@ def parse(body: str, sender: Optional[str] = None) -> Parsed:
     return p
 
 
-__all__ = ["Parsed", "parse", "KNOWN_SENDERS", "SENDER_OP", "SHORT_CODES", "IN_RE", "OUT_RE",
-           "strip_marketing"]
+__all__ = ["Parsed", "parse", "parse_all", "split_alerts", "KNOWN_SENDERS", "SENDER_OP",
+           "SHORT_CODES", "IN_RE", "OUT_RE", "strip_marketing"]

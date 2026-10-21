@@ -30,6 +30,8 @@ from typing import Any, Optional
 import numpy as np
 
 from ..config import get
+from .graph import (CIRCULAR_SHARE_ALERT, INCOME_CONCENTRATION_ALERT,
+                    graph_signals)
 
 FEATURES = [
     "hist_days", "n_txn", "monthly_income", "income_weeks_active", "income_cv", "out_in_ratio",
@@ -43,6 +45,12 @@ FEATURES = [
     # data quality
     "window_coverage", "strict_integrity", "fee_variance_share", "failed_txn_share",
     "n_txn_total", "n_balance_updates",
+    # anti-fraud: corroboration of the repayment habit, and the shape of the
+    # counterparty graph (money that comes back out, and how lopsided the
+    # wallet is). These are features, not decoration: the fitted model reads
+    # them too.
+    "repay_months", "repay_variety", "circular_share", "both_ways",
+    "income_concentration", "top_payer_share",
 ]
 WEEKS = 13
 WINDOW_DAYS = WEEKS * 7
@@ -59,6 +67,13 @@ STATUS_INSUFFICIENT = "insufficient_data"
 DECISION_SCORED = "score"
 DECISION_REVIEW = "refer_manual_review"
 DECISION_INSUFFICIENT = "insufficient_data"
+
+#: How many transactions a window needs before the share of incoming
+#: transactions says something about the wallet rather than about its size.
+CONCENTRATION_MIN_TXNS = 20
+#: The same guard for the circular-flow signal. Two payments to and from the
+#: same person is a favour, not a laundering scheme.
+CIRCULAR_MIN_TXNS = 10
 
 
 @dataclass
@@ -90,6 +105,11 @@ def _min_integrity() -> float:
 
 def _min_window_coverage() -> float:
     return float(get("MIN_WINDOW_COVERAGE", 0.25))
+
+
+def _min_readable_share() -> float:
+    """How much of the supplied history has to be readable to score on it."""
+    return float(get("MIN_READABLE_SHARE", 0.2))
 
 
 def _fee_tolerance(amount) -> float:
@@ -195,31 +215,33 @@ def build_features(rows, ledger: Optional[Ledger] = None,
     updates = [] if ledger is None else list(ledger.balance_updates)
     f = dict.fromkeys(FEATURES, 0.0)
 
-    dated = [r for r in txns if r.get("timestamp")]
+    dated = [(r, _ts(r["timestamp"])) for r in txns if r.get("timestamp")]
+    # A timestamp the platform cannot read is not a timestamp: an export with
+    # an impossible date ("2026-10-32") must not break the sort.
+    dated = [(r, t) for r, t in dated if t is not None]
     if not dated:
         f["integrity"] = 1.0
         f["strict_integrity"] = 1.0
         return f
 
-    dated.sort(key=lambda r: _ts(r["timestamp"]))
+    dated.sort(key=lambda rt: rt[1])
     f["n_txn_total"] = float(len(dated))
     f["n_balance_updates"] = float(len(updates))
-    span = (max((_ts(dated[-1]["timestamp"]) - _ts(dated[0]["timestamp"])).days, 1)
-            if len(dated) >= 2 else 1)
+    span = max((dated[-1][1] - dated[0][1]).days, 1) if len(dated) >= 2 else 1
     if history_span_days:
         span = max(span, int(history_span_days))
     f["hist_days"] = float(span)
 
-    t1 = _ts(dated[-1]["timestamp"])
+    t1 = dated[-1][1]
     start = t1 - timedelta(days=WINDOW_DAYS)
-    window = [r for r in dated if _ts(r["timestamp"]) >= start]
+    window = [(r, t) for r, t in dated if t >= start]
     f["n_txn"] = float(len(window))
     if not window:
         f["integrity"] = 1.0
         f["strict_integrity"] = 1.0
         return f
 
-    covered = (_ts(window[-1]["timestamp"]) - _ts(window[0]["timestamp"])).days
+    covered = (window[-1][1] - window[0][1]).days
     f["window_coverage"] = float(min(1.0, max(covered, 0) / WINDOW_DAYS))
 
     wk = np.zeros(WEEKS)
@@ -229,9 +251,10 @@ def build_features(rows, ledger: Optional[Ledger] = None,
     inc_amts: list[float] = []
     out_by = {"airtime": 0.0, "withdrawal": 0.0, "merchant": 0.0}
     n_loan = 0
+    loan_months: set[str] = set()
+    loan_amounts: set[float] = set()
     total_fees = 0.0
-    for r in window:
-        t = _ts(r["timestamp"])
+    for r, t in window:
         a = float(r.get("amount") or 0)
         fee = float(r.get("fee") or 0)
         total_fees += fee
@@ -248,9 +271,12 @@ def build_features(rows, ledger: Optional[Ledger] = None,
             out = a + fee
             outflow += out
             if r.get("category") in out_by:
-                out_by[r["category"]] += out
+                out_by[r.get("category")] += out
             if r.get("category") == "loan_repayment":
                 n_loan += 1
+                loan_amounts.add(round(a, 2))
+                if r.get("timestamp"):
+                    loan_months.add(str(r["timestamp"])[:7])
 
     f["monthly_income"] = income / (WINDOW_DAYS / 30)
     f["income_weeks_active"] = float((wk > 0).mean())
@@ -258,6 +284,11 @@ def build_features(rows, ledger: Optional[Ledger] = None,
     f["out_in_ratio"] = outflow / (income + cash_in + 1.0)
     f["net_savings_rate"] = float(np.clip((income + cash_in - outflow) / (income + cash_in + 1.0), -1, 1))
     f["n_loan_repay"] = n_loan
+    # A borrower repays month after month, and the amount moves. Four identical
+    # "repayments" in one window are a line in a script, not a habit, so the
+    # scorecard only pays for the corroboration.
+    f["repay_months"] = float(len(loan_months))
+    f["repay_variety"] = float(len(loan_amounts))
     f["airtime_share"] = out_by["airtime"] / (outflow + 1.0)
     f["withdrawal_share"] = out_by["withdrawal"] / (outflow + 1.0)
     f["merchant_share"] = out_by["merchant"] / (outflow + 1.0)
@@ -266,15 +297,12 @@ def build_features(rows, ledger: Optional[Ledger] = None,
     f["top_payer_share"] = max(inc_amts) / income if income > 0 else 1.0
 
     # -------- velocity & timing
-    total_amount = sum(float(r.get("amount") or 0) for r in window)
+    total_amount = sum(float(r.get("amount") or 0) for r, _ in window)
     f["txn_per_day"] = f["n_txn"] / max(covered, 1)
     f["amount_velocity"] = total_amount / max(covered, 1)
     night = weekend = round_amt = 0
     dow_counts: dict[int, int] = {}
-    for r in window:
-        t = _ts(r["timestamp"])
-        if t is None:
-            continue
+    for r, t in window:
         dow_counts[t.weekday()] = dow_counts.get(t.weekday(), 0) + 1
         if t.hour >= 22 or t.hour < 5:
             night += 1
@@ -296,23 +324,30 @@ def build_features(rows, ledger: Optional[Ledger] = None,
 
     # -------- balance behaviour, over the same window
     totals, running = [], {}
-    for r in sorted(window, key=lambda r: _ts(r["timestamp"])):
+    for r, _t in window:
         running[r.get("operator") or "?"] = float(r.get("balance") or 0)
         totals.append(sum(running.values()))
-    totals = np.array(totals)
+    totals = np.array(totals) if totals else np.array([0.0])
     f["bal_mean"], f["bal_min"] = float(totals.mean()), float(totals.min())
     f["bal_cv"] = float(totals.std() / totals.mean()) if totals.mean() > 0 else 3.0
     f["low_bal_share"] = float((totals < 20).mean())
     f["buffer_ratio"] = f["bal_mean"] / (outflow / (WINDOW_DAYS / 30) + 1.0)
 
-    chain_rows = list(window) + [u for u in updates if u.get("timestamp")
-                                  and _ts(u["timestamp"]) >= start]
+    chain_rows = [r for r, _ in window] + [u for u in updates if u.get("timestamp")
+                                           and _ts(u["timestamp"]) >= start]
     report = integrity_report(chain_rows)
     f["integrity"] = report["integrity"]
     f["strict_integrity"] = report["strict_integrity"]
     f["fee_variance_share"] = report["fee_variance_share"]
     if ledger is not None and ledger.failed:
         f["failed_txn_share"] = len(ledger.failed) / max(len(window) + len(ledger.failed), 1)
+
+    # -------- who the money came from, and where it went
+    graph = graph_signals([r for r, _ in window])
+    f["circular_share"] = graph["circular_share"]
+    f["income_concentration"] = graph["income_concentration"]
+    f["top_payer_share"] = graph["top_payer_share"]
+    f["both_ways"] = float(graph["both_ways"])
     return f
 
 
@@ -329,11 +364,17 @@ COMPONENTS = {  # name: (weight, human text when weak)
 
 def component_values(f):
     clip = lambda x: float(min(max(x, 0.0), 1.0))
+    # A repayment only counts as a habit when it recurs (several months) and
+    # the amount moves. A single line of "repayment" messages, or four of them
+    # with the same amount, is a claim, not a habit.
+    repayment = min(f["n_loan_repay"] / 4.0,
+                    f.get("repay_months", 0.0) / 3.0,
+                    f.get("repay_variety", 0.0) / 2.0)
     return {
         "income_regularity": clip(0.6 * f["income_weeks_active"] + 0.4 * (1 - min(f["income_cv"], 2) / 2)),
         "cash_surplus": clip((f["net_savings_rate"] + 0.2) / 0.6),
         "balance_buffer": clip(0.7 * min(f["buffer_ratio"], 1.0) + 0.3 * (1 - f["low_bal_share"])),
-        "repayment_habit": clip(f["n_loan_repay"] / 4),
+        "repayment_habit": clip(repayment),
         "customer_base": clip(f["n_unique_payers"] / 10),
         "history_depth": clip(f["hist_days"] / 90),
     }
@@ -355,7 +396,8 @@ def band(score):
             else "Good" if score < 750 else "Very good")
 
 
-def assess(f, integrity_report_: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+def assess(f, integrity_report_: Optional[dict[str, Any]] = None,
+           ledger: Optional[Ledger] = None) -> dict[str, Any]:
     """Decide whether the data supports a lending decision.
 
     Returns the status, the decision, and the reasons.
@@ -392,6 +434,49 @@ def assess(f, integrity_report_: Optional[dict[str, Any]] = None) -> dict[str, A
             review.append(
                 f"the export has a {gap_h:.0f} hour gap (around {integrity_report_.get('largest_gap_at')}); "
                 f"export the full message history to close it")
+    if ledger is not None:
+        # Messages the parser could not read are the quietest way to lose
+        # money: the score still looks fine and the ledger is missing rows.
+        # They are counted, and a large enough share of them stops the score.
+        unread = int(ledger.stats.get("unread", 0) or 0)
+        messages = int(ledger.stats.get("messages", 0) or 0)
+        if unread:
+            share = unread / max(messages, 1)
+            if share >= _min_readable_share():
+                insufficient.append(
+                    f"{unread} of {messages} message(s) could not be read "
+                    f"({share:.0%}); the history is incomplete")
+            else:
+                review.append(
+                    f"{unread} of {messages} message(s) could not be read")
+        unchained = int(ledger.stats.get("unchained", 0) or 0)
+        if unchained:
+            review.append(
+                f"{unchained} transaction(s) carried no balance statement and could not be "
+                f"checked against the balance chain")
+        mismatch = int(ledger.stats.get("timestamp_mismatch", 0) or 0)
+        if mismatch:
+            review.append(
+                f"{mismatch} message(s) carry a timestamp that disagrees with the export's own "
+                f"timestamp; the message and the file it came from were not produced together")
+
+    # Signals that do not need a second source to be worth a human's time.
+    circular = float(f.get("circular_share", 0.0) or 0.0)
+    if circular > CIRCULAR_SHARE_ALERT and n_txn >= CIRCULAR_MIN_TXNS:
+        review.append(
+            f"{circular:.0%} of the money received came from accounts that also took money out; "
+            f"the money may be circulating rather than earned")
+    concentration = float(f.get("income_concentration", 0.0) or 0.0)
+    # A small file of incoming payments only is a thin file, not a fraud
+    # signal: the ratio is only meaningful once there is enough of a history
+    # for the ratio to mean something.
+    if concentration > INCOME_CONCENTRATION_ALERT and n_txn >= CONCENTRATION_MIN_TXNS:
+        review.append(
+            f"{concentration:.0%} of the transactions are incoming; a wallet that only receives "
+            f"is not a wallet that earns")
+    # The top-payer share is reported, not used to stop a score: a wallet paid
+    # by one employer is normal, and refusing to score it would exclude a
+    # large part of the people this service exists for.
 
     if insufficient:
         status, decision = STATUS_INSUFFICIENT, DECISION_INSUFFICIENT
@@ -403,19 +488,38 @@ def assess(f, integrity_report_: Optional[dict[str, Any]] = None) -> dict[str, A
 
 
 def make_passport(rows, user_label="applicant", pd_model_score=None, ledger: Optional[Ledger] = None,
-                 history_span_days: Optional[int] = None):
+                 history_span_days: Optional[int] = None, features: Optional[dict[str, float]] = None):
     """The consent-gated, shareable summary. Contains aggregates only: no raw messages, names or numbers."""
-    f = build_features(rows, ledger=ledger, history_span_days=history_span_days)
+    f = features if features is not None else build_features(
+        rows, ledger=ledger, history_span_days=history_span_days)
     sc = scorecard(f)
     integrity = f["integrity"]
     chain = integrity_report((ledger.all_rows() if ledger is not None else list(rows)))
-    quality = assess(f, chain)
+    quality = assess(f, chain, ledger=ledger)
+    stats = ledger.stats if ledger is not None else {}
+    messages = int(stats.get("messages", 0) or 0)
+    unread = int(stats.get("unread", 0) or 0)
+    readable_share = round((messages - unread) / messages, 3) if messages else None
+    fraud_signals = {
+        "circular_share": round(float(f.get("circular_share", 0.0) or 0.0), 3),
+        "both_ways_counterparties": int(f.get("both_ways", 0) or 0),
+        "income_concentration": round(float(f.get("income_concentration", 0.0) or 0.0), 3),
+        "top_payer_share": round(float(f.get("top_payer_share", 0.0) or 0.0), 3),
+        "repayments_seen": int(f.get("n_loan_repay", 0) or 0),
+        "repayment_months": int(f.get("repay_months", 0) or 0),
+        "timestamp_mismatches": int(stats.get("timestamp_mismatch", 0) or 0),
+    }
     return {
         "applicant": user_label,
         "score": sc["score"], "band": band(sc["score"]),
         "model_pd_score": pd_model_score,
         "status": quality["status"],
         "decision": quality["decision"],
+        # What this score is worth depends on where the messages came from.
+        # Every score here rests on SMS the applicant supplied, and nothing in
+        # the pipeline can prove those messages came from the operator.
+        "verification": "sms_unverified",
+        "fraud_signals": fraud_signals,
         "data_quality": {
             "window_coverage": round(f["window_coverage"], 3),
             "integrity_share": round(integrity, 3),
@@ -423,6 +527,9 @@ def make_passport(rows, user_label="applicant", pd_model_score=None, ledger: Opt
             "links_checked": chain["links_checked"],
             "balance_chain_breaks": len(chain["breaks"]),
             "largest_gap_hours": chain.get("largest_gap_hours", 0.0),
+            "messages_read": messages - unread if messages else None,
+            "messages_unread": unread if messages else None,
+            "readable_share": readable_share,
             "issues": quality["issues"],
         },
         "history_days": int(f["hist_days"]), "transactions_used": int(f["n_txn"]),

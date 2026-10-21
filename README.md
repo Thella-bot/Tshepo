@@ -54,6 +54,7 @@ hybrid that also reads the rule flags), and a fine-tuned multilingual transforme
         import_sms.py      import a phone export (txt -> JSONL)
         predict.py         classify messages with rules / tfidf / hybrid / transformer
         passport.py        build a credit passport per user from a message file
+        drift.py           watch the operator templates for drift (parse rate, churn, fields)
         train_tfidf.py     train the TF-IDF and hybrid classifiers
         train_transformer.py  fine-tune the transformer
         train_score.py     train the cash-flow scoring model end to end
@@ -246,3 +247,17 @@ On the real EcoCash/M-Pesa sample imported here, the rule parser extracts 98/119
 and 14/29 M-Pesa messages as genuine transactions. The balance-chain integrity check then
 flags incomplete exports (missing messages break the chain) for review instead of scoring
 them on partial data.
+
+## Watching for template drift
+
+An operator can change an alert template without telling anyone. The parser does not
+crash in that case, it just stops understanding the new wording, and the symptom is a
+ledger with holes in it rather than an error. The drift monitor watches the signals that
+move when a template changes - the parse rate, the share of unseen templates, the rate of
+messages missing an amount/balance/direction, and the shape of the transaction reference:
+
+    python -m tshepo.cli.drift --baseline data/known_good.jsonl --current data/new_export.jsonl
+
+It prints a verdict (`ok` / `watch` / `drift`), the drift score and what moved, and exits
+with code 2 when the verdict is `drift` so it can run as a scheduled check that fails
+loudly instead of a number nobody reads.

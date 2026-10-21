@@ -120,6 +120,8 @@ def score_user(
             if history_span_days is None:
                 history_span_days = span_days
             ledger = build_ledger_for(records, label_fn=gate)
+            # The feature vector is computed once and reused: the passport
+            # needs the same numbers the scorecard needs.
             f = build_features(ledger.transactions, ledger=ledger)
             sc = scorecard(f)
             pd_score: Optional[float] = None
@@ -127,7 +129,7 @@ def score_user(
                 pd_score = round(float(850 - 550 * pd_model.predict_proba(f)), 1)
             passport = cast(dict[str, Any], make_passport(
                 ledger.transactions, user_label=user_label, pd_model_score=pd_score,
-                ledger=ledger, history_span_days=history_span_days))
+                ledger=ledger, history_span_days=history_span_days, features=f))
             passport["score"] = sc["score"]
             passport["messages_supplied"] = len(records)
             passport["messages_dropped"] = dropped

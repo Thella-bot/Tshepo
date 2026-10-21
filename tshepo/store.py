@@ -69,8 +69,15 @@ CREATE TABLE IF NOT EXISTS access_log (
     detail    TEXT,
     at        TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS message_hashes (
+    body_hash TEXT NOT NULL,
+    user_id   TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (body_hash, user_id)
+);
 CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id);
 CREATE INDEX IF NOT EXISTS idx_messages_consent ON messages(consent_id);
+CREATE INDEX IF NOT EXISTS idx_message_hashes_hash ON message_hashes(body_hash);
 """
 
 
@@ -199,6 +206,48 @@ class Store:
         with self._lock:
             return int(self._conn.execute(q, args).fetchone()["n"])
 
+    # ------------------------------------------------- message provenance
+    def record_message_hashes(self, user_id: str, body_hashes: Iterable[str]) -> int:
+        """Remember which messages this applicant submitted.
+
+        The hash says nothing about the message, and it is deleted with the
+        rest of the applicant's data.
+        """
+        now = _iso(_now())
+        payload = [(h, str(user_id), now) for h in set(body_hashes) if h]
+        if not payload:
+            return 0
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO message_hashes (body_hash, user_id, created_at) "
+                "VALUES (?,?,?)", payload)
+            self._conn.commit()
+        return len(payload)
+
+    def shared_message_counts(self, user_id: str, body_hashes: Iterable[str]) -> dict[str, int]:
+        """How many of these messages another applicant has already submitted."""
+        hashes = [h for h in set(body_hashes) if h]
+        if not hashes:
+            return {}
+        out: dict[str, int] = {}
+        with self._lock:
+            for start in range(0, len(hashes), 400):
+                chunk = hashes[start:start + 400]
+                placeholders = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"SELECT user_id, COUNT(*) AS n FROM message_hashes "
+                    f"WHERE body_hash IN ({placeholders}) AND user_id != ? GROUP BY user_id",
+                    (*chunk, str(user_id))).fetchall()
+                for row in rows:
+                    out[str(row["user_id"])] = out.get(str(row["user_id"]), 0) + int(row["n"])
+        return out
+
+    def clear_message_hashes(self, user_id: str) -> int:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM message_hashes WHERE user_id=?", (user_id,))
+            self._conn.commit()
+        return cur.rowcount
+
     def delete_messages(self, user_id: str) -> int:
         with self._lock:
             cur = self._conn.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
@@ -235,10 +284,11 @@ class Store:
         with self._lock:
             messages = self._conn.execute("DELETE FROM messages WHERE user_id=?", (user_id,)).rowcount
             passports = self._conn.execute("DELETE FROM passports WHERE user_id=?", (user_id,)).rowcount
+            hashes = self._conn.execute("DELETE FROM message_hashes WHERE user_id=?", (user_id,)).rowcount
             self._conn.commit()
         logger.info("user data erased", extra={"user_id": user_id,
                                               "messages": messages, "passports": passports})
-        return {"messages": messages, "passports": passports}
+        return {"messages": messages, "passports": passports, "message_hashes": hashes}
 
     def revoke_and_erase(self, consent_id: str) -> dict[str, Any]:
         c = self.get_consent(consent_id)

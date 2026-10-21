@@ -52,6 +52,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, validator
 
+from .antiabuse import message_hashes, replay_reuse
 from .config import (ALLOW_UNCALIBRATED_MODEL, API_KEY, CORS_ORIGINS, ENABLE_DOCS,
                      ENABLE_PORTAL, MAX_REQUEST_SIZE_MB, RETENTION_DAYS, WITHHOLD_SCORE,
                      model_path)
@@ -598,6 +599,21 @@ async def score_consent(consent_id: str, request: Request,
     records = [r for r in records if r.get("origin") != "sent"]
     gate = fallback_gate(_get_gate(None), breaker=_GATE_BREAKER)
     passport = score_user(records, label_fn=gate, user_label=user_id)
+    # A history that another applicant has already submitted is one history
+    # scored twice. It does not prove fraud - people share phones and banks -
+    # but a lender has to know before they act on the number.
+    hashes = message_hashes(records)
+    shared = store.shared_message_counts(user_id, hashes)
+    is_replay, other, count = replay_reuse(shared, len(hashes))
+    passport.setdefault("fraud_signals", {})["shared_with_other_applicants"] = count
+    if is_replay:
+        passport["status"] = "review"
+        passport["decision"] = "refer_manual_review"
+        passport["fraud_signals"]["replayed_history"] = other
+        passport["data_quality"]["issues"].append(
+            f"{count} of the {len(hashes)} submitted message(s) were also submitted by another "
+            f"applicant; this history may have been used twice")
+    store.record_message_hashes(user_id, hashes)
     store.put_passport(user_id, consent_id, passport)
     store.log_access(f"consent:{consent_id}", "score", user_id, None)
     if SCORING_COUNT is not None:

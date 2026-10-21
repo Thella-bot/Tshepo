@@ -28,7 +28,10 @@ def _readable(records):
     ledger = build_ledger(records)
     stats = dict(ledger.stats)
     stats.setdefault("messages", len(records))
-    stats["readable_share"] = round(stats.get("usable", 0) / max(len(records), 1), 3)
+    stats.setdefault("unread", 0)
+    stats["readable_share"] = round(
+        (stats["messages"] - stats["unread"]) / max(stats["messages"], 1), 3)
+    stats["usable_share"] = round(stats.get("usable", 0) / max(stats["messages"], 1), 3)
     return stats
 
 
@@ -67,7 +70,11 @@ def main():
           f"{stats.get('balance_updates', 0)} balance updates, "
           f"{stats.get('failed', 0)} failed transactions, "
           f"{stats.get('noise', 0)} noise, {stats.get('duplicates', 0)} duplicates")
-    print(f"readable share: {stats.get('readable_share', 0):.0%}")
+    print(f"readable share: {stats.get('readable_share', 0):.0%} "
+          f"(usable share {stats.get('usable_share', 0):.0%})")
+    if stats.get("unread"):
+        print(f"WARNING: {stats['unread']} message(s) could not be read at all. "
+              f"They are not in the ledger and no money was taken from them.")
     if a.label:
         print(f"labelled as: {a.label}")
     else:
