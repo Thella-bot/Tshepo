@@ -1,78 +1,73 @@
 """Import a real SMS export into the JSONL format the project uses.
 
-Android "Messages" and Samsung "SMS Backup+" exports look like:
+Supported exports (auto-detected):
 
-    Received from <sender> on <YYYY-MM-DD> <HH:MM>
-
-     <message body>
-
-    -----------------------------------------------------
+* Google Messages "Export messages" .txt
+* Samsung SMS Backup+ .xml
+* Google Messages JSON backup
+* CSV / TSV with a date, a sender and a body column
 
     python -m tshepo.cli.import_sms data/real_ecocash_raw.txt --out data/real_ecocash.jsonl
-    python -m tshepo.cli.import_sms data/real_ecocash_raw.txt --out data/real_ecocash.jsonl --label genuine_transaction
+    python -m tshepo.cli.import_sms data/real_ecocash_raw.txt --label genuine_transaction
 
-Labels are optional. The importer only labels what you tell it to; the classifier
-decides the rest. Real data stays in data/ and is gitignored.
+The importer reports what the parser made of the export, because an export
+that only yields a third of its messages is a data problem, not a scoring
+problem, and it is invisible unless somebody looks.
 """
 import argparse
 import json
 import os
-import re
 
 from ..config import LABELS, ensure_dir
-
-BLOCK_RE = re.compile(
-    r"^Received from (?P<sender>.+?) on (?P<date>\d{4}-\d{2}-\d{2})[ T](?P<time>\d{2}:\d{2})",
-    re.M)
-SEP_RE = re.compile(r"^-{3,}\s*$", re.M)
+from ..importers import detect_format, parse_file, to_jsonl
+from ..parsing.parser import build_ledger
 
 
-def parse_export(text):
-    """Split a phone export into (sender, received_at, body) records."""
-    parts = SEP_RE.split(text)
-    out = []
-    for part in parts:
-        m = BLOCK_RE.search(part)
-        if not m:
-            continue
-        body = part[m.end():]
-        body = body.replace("\r", "").strip("\n")
-        body = " ".join(body.split())          # the export wraps long lines
-        if not body:
-            continue
-        out.append(dict(sender=m.group("sender").strip(),
-                        received_at=f"{m.group('date')}T{m.group('time')}",
-                        body=body))
-    return out
+def _readable(records):
+    """What the parser made of the export: transactions, updates, failures, noise."""
+    ledger = build_ledger(records)
+    stats = dict(ledger.stats)
+    stats.setdefault("messages", len(records))
+    stats["readable_share"] = round(stats.get("usable", 0) / max(len(records), 1), 3)
+    return stats
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("input", help="the exported .txt file")
+    ap.add_argument("input", help="the exported file (.txt, .xml, .json, .csv, .tsv)")
     ap.add_argument("--out", default=None, help="output JSONL (default: <input>.jsonl)")
     ap.add_argument("--label", default=None, choices=LABELS,
                     help="label every message in the file (use only when you know)")
     ap.add_argument("--user-id", default="REAL01", help="user id for these messages")
+    ap.add_argument("--format", default=None,
+                    choices=["google_txt", "samsung_xml", "google_json", "csv", "tsv"],
+                    help="override the format detection")
     a = ap.parse_args()
 
-    with open(a.input, encoding="utf-8") as f:
-        text = f.read()
-    recs = parse_export(text)
+    with open(a.input, encoding="utf-8", errors="replace") as fh:
+        head = fh.read(4096)
+    fmt = a.format or detect_format(head, os.path.basename(a.input))
+
+    recs = parse_file(a.input, fmt=fmt)
     out = a.out or os.path.splitext(a.input)[0] + ".jsonl"
     ensure_dir(os.path.dirname(out) or ".")
 
-    with open(out, "w", encoding="utf-8") as f:
-        for i, r in enumerate(recs):
-            r = dict(id=i, user_id=a.user_id, **r)
-            if a.label:
-                r["label"] = a.label
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    rows = to_jsonl(recs, user_id=a.user_id, label=a.label)
+    with open(out, "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    print(f"{len(recs)} messages -> {out}")
+    print(f"{len(rows)} messages -> {out}  (format: {fmt})")
     senders = {}
-    for r in recs:
-        senders[r["sender"]] = senders.get(r["sender"], 0) + 1
+    for r in rows:
+        senders[r.get("sender")] = senders.get(r.get("sender"), 0) + 1
     print("senders:", senders)
+    stats = _readable(rows)
+    print(f"parsed: {stats.get('transactions', 0)} transactions, "
+          f"{stats.get('balance_updates', 0)} balance updates, "
+          f"{stats.get('failed', 0)} failed transactions, "
+          f"{stats.get('noise', 0)} noise, {stats.get('duplicates', 0)} duplicates")
+    print(f"readable share: {stats.get('readable_share', 0):.0%}")
     if a.label:
         print(f"labelled as: {a.label}")
     else:

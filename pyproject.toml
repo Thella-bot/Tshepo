@@ -46,6 +46,9 @@ tshepo-serve = "tshepo.cli.serve:main"
 [tool.setuptools.packages.find]
 include = ["tshepo*"]
 
+[tool.setuptools.package-data]
+"tshepo" = ["web/*.html", "web/*.css", "web/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]

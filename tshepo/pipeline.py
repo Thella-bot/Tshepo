@@ -16,15 +16,20 @@ import time
 from collections import defaultdict
 from typing import Any, Optional, cast
 
-from .features.cashflow import build_features, make_passport, scorecard
+from .config import get
+from .features.cashflow import Ledger, build_features, make_passport, scorecard
 from .logging import correlation_id, get_logger, new_correlation_id
 from .models.gate import GateFn, rule_gate
-from .parsing.parser import extract_transactions
+from .parsing.parser import build_ledger
 from .resilience import ModelError, fallback_gate, time_budget
 from .security import RateLimiter, RateLimitExceeded, validate_records
 
 logger = get_logger("pipeline")
 _rate_limiter = RateLimiter()
+
+
+def _max_records_per_user() -> int:
+    return int(get("MAX_RECORDS_PER_USER", 5000))
 
 
 def group_by_user(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -35,14 +40,48 @@ def group_by_user(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
     return out
 
 
+def build_ledger_for(records: list[dict[str, Any]], label_fn: Optional[GateFn] = None) -> Ledger:
+    """The full ledger for one user: transactions, balance updates and failures."""
+    return build_ledger(records, label_fn=label_fn or rule_gate)
+
+
 def ledger_for(records: list[dict[str, Any]], label_fn: Optional[GateFn] = None) -> list[dict[str, Any]]:
     """The transactions the gate trusts, as ledger rows."""
-    return cast(list[dict[str, Any]], extract_transactions(records, label_fn=label_fn or rule_gate))
+    return build_ledger_for(records, label_fn=label_fn).transactions
 
 
 def features_for(records: list[dict[str, Any]], label_fn: Optional[GateFn] = None) -> dict[str, float]:
     """Cash-flow features for ONE user from their message list."""
-    return cast(dict[str, float], build_features(ledger_for(records, label_fn=label_fn)))
+    return build_features(build_ledger_for(records, label_fn=label_fn).transactions)
+
+
+def _trim_to_cap(recs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int, int]:
+    """Keep the newest messages when a user exceeds the per-user cap.
+
+    The cap used to keep the OLDEST records, so a user with more than the cap
+    messages silently lost their most recent 13 weeks and was scored on a
+    window that ended years ago. The newest messages are the ones the score
+    is computed from, so those are the ones that are kept.
+
+    Returns (kept, dropped, span_days) where span_days is the true history
+    span of everything supplied, so a trimmed ledger does not understate how
+    long the user has been transacting.
+    """
+    cap = _max_records_per_user()
+    stamps = [str(r.get("received_at") or "") for r in recs]
+    span_days = 0
+    dated = sorted(s for s in stamps if s)
+    if len(dated) >= 2:
+        from .features.cashflow import _ts
+        a, b = _ts(dated[0]), _ts(dated[-1])
+        if a and b:
+            span_days = (b - a).days
+    if len(recs) <= cap:
+        return recs, 0, span_days
+    ordered = sorted(range(len(recs)), key=lambda i: (stamps[i], i))
+    keep_idx = set(ordered[-cap:])
+    kept = [r for i, r in enumerate(recs) if i in keep_idx]
+    return kept, len(recs) - cap, span_days
 
 
 def score_user(
@@ -52,6 +91,7 @@ def score_user(
     pd_model: Optional[Any] = None,
     rate_limit_key: Optional[str] = None,
     correlation_id_value: Optional[str] = None,
+    history_span_days: Optional[int] = None,
 ) -> dict[str, Any]:
     """Full passport for one user: gate -> ledger -> features -> score.
 
@@ -59,6 +99,8 @@ def score_user(
     reported alongside the transparent score.
     rate_limit_key: optional key for per-user rate limiting.
     correlation_id_value: request-scoped correlation id for tracing.
+    history_span_days: true span of the user's history when the message list was
+    trimmed, so history depth is not understated.
     """
     cid = correlation_id_value or new_correlation_id()
     token = correlation_id.set(cid)
@@ -74,18 +116,32 @@ def score_user(
         with time_budget(5.0, "score_user"):
             t0 = time.monotonic()
             records = validate_records(records)
-            rows = ledger_for(records, label_fn=gate)
-            f = build_features(rows)
+            records, dropped, span_days = _trim_to_cap(records)
+            if history_span_days is None:
+                history_span_days = span_days
+            ledger = build_ledger_for(records, label_fn=gate)
+            f = build_features(ledger.transactions, ledger=ledger)
             sc = scorecard(f)
             pd_score: Optional[float] = None
             if pd_model is not None:
                 pd_score = round(float(850 - 550 * pd_model.predict_proba(f)), 1)
-            passport = cast(dict[str, Any], make_passport(rows, user_label=user_label, pd_model_score=pd_score))
+            passport = cast(dict[str, Any], make_passport(
+                ledger.transactions, user_label=user_label, pd_model_score=pd_score,
+                ledger=ledger, history_span_days=history_span_days))
             passport["score"] = sc["score"]
+            passport["messages_supplied"] = len(records)
+            passport["messages_dropped"] = dropped
+            if dropped:
+                passport["data_quality"]["issues"].append(
+                    f"{dropped} message(s) beyond the per-user cap were not read; "
+                    f"the most recent {len(records)} were kept")
+                passport["status"] = "review"
+                passport["decision"] = "refer_manual_review"
             dur_ms = (time.monotonic() - t0) * 1000
             logger.info(
                 "scored user",
-                extra={"user_id": user_label, "score": sc["score"], "duration_ms": round(dur_ms, 1), "correlation_id": cid},
+                extra={"user_id": user_label, "score": sc["score"], "duration_ms": round(dur_ms, 1),
+                       "correlation_id": cid, "status": passport["status"]},
             )
             return passport
     except RateLimitExceeded:
@@ -124,7 +180,6 @@ def score_batch(
                 if rate_limit_key is not None and not _rate_limiter.allow(f"{rate_limit_key}:{uid}"):
                     logger.warning("rate limited, skipping user", extra={"user_id": uid, "correlation_id": cid})
                     continue
-                recs = recs[:5000]
                 out[uid] = score_user(
                     recs,
                     label_fn=label_fn,

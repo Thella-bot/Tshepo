@@ -42,6 +42,28 @@ ENABLE_DOCS: bool = os.environ.get("TSHEPO_ENABLE_DOCS", "0") == "1"
 CORS_ORIGINS: list[str] = [o.strip() for o in os.environ.get("TSHEPO_CORS_ORIGINS", "").split(",") if o.strip()]
 MAX_REQUEST_SIZE_MB: float = float(os.environ.get("TSHEPO_MAX_REQUEST_SIZE_MB", "10"))
 
+# --- consent, retention and data-quality policy -------------------------------
+# Where the consent ledger and the collected messages live. Mount this volume
+# read-write; everything else in the container can stay read-only.
+DB_PATH: str = os.environ.get("TSHEPO_DB_PATH", os.path.join(DATA_DIR, "tshepo.db"))
+# How long a consent stays valid before the data behind it must be purged.
+CONSENT_TTL_DAYS: int = int(os.environ.get("TSHEPO_CONSENT_TTL_DAYS", "90"))
+# Hard retention limit for collected messages, independent of the consent.
+RETENTION_DAYS: int = int(os.environ.get("TSHEPO_RETENTION_DAYS", "180"))
+# Share of balance-chain links that must hold before a score is presented as a
+# decision. Below this the passport is referred for manual review.
+MIN_INTEGRITY: float = float(os.environ.get("TSHEPO_MIN_INTEGRITY", "0.9"))
+# Share of the 13-week window the history must cover.
+MIN_WINDOW_COVERAGE: float = float(os.environ.get("TSHEPO_MIN_WINDOW_COVERAGE", "0.25"))
+# Withhold the numeric score whenever the passport is not "scored".
+WITHHOLD_SCORE: bool = os.environ.get("TSHEPO_WITHHOLD_SCORE", "1") == "1"
+# Serve a score model that was fitted on synthetic outcomes. Off by default:
+# the shipped model is fitted on synthetic labels and proves nothing about
+# real repayment behaviour.
+ALLOW_UNCALIBRATED_MODEL: bool = os.environ.get("TSHEPO_ALLOW_UNCALIBRATED_MODEL", "0") == "1"
+# Serve the web capture portal.
+ENABLE_PORTAL: bool = os.environ.get("TSHEPO_ENABLE_PORTAL", "1") == "1"
+
 _CONFIG_CACHE: dict[str, Any] | None = None
 
 

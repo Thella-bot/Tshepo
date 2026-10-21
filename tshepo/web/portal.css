@@ -1,0 +1,84 @@
+:root {
+  --ink: #16211c;
+  --muted: #5d6b64;
+  --line: #d9e0db;
+  --bg: #f6f8f6;
+  --card: #ffffff;
+  --accent: #1c6b4a;
+  --danger: #9b2c2c;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+header, main, footer { max-width: 40rem; margin: 0 auto; padding: 1rem 1.1rem; }
+
+h1 { font-size: 1.7rem; margin: 0.6rem 0 0.2rem; letter-spacing: -0.01em; }
+h2 { font-size: 1.15rem; margin: 0 0 0.5rem; }
+
+.tagline { margin: 0 0 1rem; color: var(--muted); }
+.muted { color: var(--muted); font-size: 0.92rem; }
+
+.step {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.notice {
+  white-space: pre-wrap;
+  font-size: 0.9rem;
+  background: #f2f6f3;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.8rem;
+  max-height: 22rem;
+  overflow-y: auto;
+}
+
+.howto { margin: 0 0 0.9rem; padding-left: 1.2rem; }
+.howto li { margin-bottom: 0.35rem; }
+
+.check { display: flex; gap: 0.6rem; align-items: flex-start; margin: 0.9rem 0; }
+.check input { margin-top: 0.25rem; width: 1.1rem; height: 1.1rem; flex: none; }
+
+input[type="file"] { width: 100%; margin-bottom: 0.8rem; font-size: 0.95rem; }
+
+button {
+  font: inherit;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: 0;
+  border-radius: 8px;
+  padding: 0.7rem 1.2rem;
+  cursor: pointer;
+  width: 100%;
+}
+
+button:disabled { background: #9fb3a8; cursor: not-allowed; }
+button.danger { background: var(--danger); }
+
+.status-ok { color: var(--accent); font-weight: 600; }
+.status-bad { color: var(--danger); font-weight: 600; }
+
+.score { font-size: 3rem; font-weight: 700; line-height: 1; letter-spacing: -0.02em; }
+.band { color: var(--muted); font-size: 1.05rem; margin: 0.2rem 0 0.8rem; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+th, td { text-align: left; padding: 0.35rem 0.2rem; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; width: 55%; }
+
+.issues { background: #fdf6ec; border: 1px solid #e8d5b5; border-radius: 8px; padding: 0.7rem; font-size: 0.9rem; }
+.issues ul { margin: 0.3rem 0 0; padding-left: 1.1rem; }
+
+code { background: #eef2ef; padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+footer { padding-top: 0; }

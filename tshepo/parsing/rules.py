@@ -4,7 +4,19 @@
 combines the flags with the parsed fields into a label in
 {genuine_transaction, suspicious, noise}.
 
-This is the zero-dependency baseline that every learned model must beat.
+:func:`build_ledger` turns a user's messages into the ledger the score is
+computed from. It applies one rule that matters: **the gate can only veto.**
+
+The parser decides what is structurally a transaction (an amount, a direction
+and a balance all present). The gate decides what is a scam. A message the
+parser can read is a transaction unless the gate calls it suspicious; a
+message the parser cannot read is noise whatever the gate says.
+
+The old arrangement let a learned gate delete real transactions simply by
+labelling them "noise" - which is exactly what the hybrid model did to the
+real EcoCash export: 98 readable rows became 82. Scam rejection still works,
+because a forged alert is structurally a transaction and still has to pass
+the gate.
 """
 from __future__ import annotations
 
@@ -12,10 +24,11 @@ import re
 from dataclasses import asdict
 from typing import Optional
 
-from .fields import (Parsed, IN_RE, OUT_RE, KNOWN_SENDERS, SENDER_OP, SENDER_TYPO,
-                     SHORT_CODES, parse)
+from ..features.cashflow import Ledger
+from .fields import (IN_RE, KNOWN_SENDERS, OUT_RE, SENDER_OP, SENDER_TYPO,
+                     SHORT_CODES, Parsed, parse)
 
-URL_RE = re.compile(r"https?://|www\.|bit\.ly|\b[\w-]+\.(?:com|net|org|info|xyz|top|ml|tk|example|co\.ls)\b", re.I)
+URL_RE = re.compile(r"https?://|www\.|\.bit\.ly|\b[\w-]+\.(?:com|net|org|info|xyz|top|ml|tk|example|co\.ls)\b", re.I)
 SECRET_RE = re.compile(r"\b(?:pin|password|passcode|otp)\b", re.I)
 ASK_RE = re.compile(r"\b(?:send|share|give|reply|enter|confirm|provide|romela|mpolelle)\b", re.I)
 NEGATION_RE = re.compile(r"\b(?:do not|don't|dont|never|u se)\b", re.I)
@@ -81,23 +94,73 @@ def classify(body: str, sender: Optional[str] = None) -> dict:
     return dict(label=label, score=score, flags=flags, parsed=parsed)
 
 
+def _row(r, parsed: Parsed) -> dict:
+    d = asdict(parsed)
+    d["timestamp"] = d["timestamp"] or r.get("received_at")
+    d["user_id"] = r.get("user_id")
+    return d
+
+
+def _dedup_key(row: dict) -> tuple:
+    """Identity of a transaction, used to drop the "initiated"/"processed" pair.
+
+    The reference alone is not enough: an operator that prints "Reference: ."
+    would make two different transactions look identical.
+    """
+    return (row.get("reference") or "", row.get("direction"),
+            row.get("amount"), row.get("balance"))
+
+
+def build_ledger(records, label_fn=None) -> Ledger:
+    """Build the ledger for one user from their messages.
+
+    The gate may only veto. A message the parser reads as a transaction joins
+    the ledger unless the gate calls it suspicious; a balance restatement
+    re-anchors the chain; a refused transaction is kept as a behavioural
+    signal rather than thrown away.
+    """
+    ledger = Ledger()
+    seen: set[tuple] = set()
+    for r in records:
+        if r.get("origin") == "sent":
+            ledger.stats["sent"] = ledger.stats.get("sent", 0) + 1
+            continue
+        res = classify(r["body"], r.get("sender"))
+        label = label_fn(r["body"], r.get("sender")) if label_fn else res["label"]
+        parsed = res["parsed"]
+        ledger.stats["messages"] = ledger.stats.get("messages", 0) + 1
+        ledger.stats[label] = ledger.stats.get(label, 0) + 1
+        if label == "suspicious":
+            ledger.stats["vetoed"] = ledger.stats.get("vetoed", 0) + 1
+            continue
+        if parsed.kind == "transaction":
+            row = _row(r, parsed)
+            key = _dedup_key(row)
+            if key in seen:
+                ledger.stats["duplicates"] = ledger.stats.get("duplicates", 0) + 1
+                continue
+            seen.add(key)
+            ledger.transactions.append(row)
+        elif parsed.kind == "balance_update":
+            ledger.balance_updates.append(_row(r, parsed))
+        elif parsed.kind == "failed":
+            ledger.failed.append(_row(r, parsed))
+    ledger.stats["transactions"] = len(ledger.transactions)
+    ledger.stats["balance_updates"] = len(ledger.balance_updates)
+    ledger.stats["failed"] = len(ledger.failed)
+    ledger.stats["usable"] = len(ledger.transactions) + len(ledger.balance_updates)
+    return ledger
+
+
 def extract_transactions(records, label_fn=None):
     """Return ledger rows for genuine transactions only.
 
-    ``label_fn(body, sender) -> label`` lets a trained model act as the gate.
-    Rows the parser cannot read as transactions are skipped.
+    Kept for callers that only want the money-moving rows. The gate may only
+    veto: see :func:`build_ledger`.
     """
-    rows = []
-    for r in records:
-        res = classify(r["body"], r.get("sender"))
-        label = label_fn(r["body"], r.get("sender")) if label_fn else res["label"]
-        if label != "genuine_transaction" or not res["parsed"].is_transaction:
-            continue
-        d = asdict(res["parsed"])
-        d["timestamp"] = d["timestamp"] or r.get("received_at")
-        d["user_id"] = r.get("user_id")
-        rows.append(d)
-    return rows
+    ledger = build_ledger(records, label_fn=label_fn)
+    return ledger.transactions
 
 
-__all__ = ["red_flags", "classify", "extract_transactions", "THRESHOLD", "WEIGHTS"]
+__all__ = ["red_flags", "classify", "extract_transactions", "build_ledger", "Ledger",
+           "THRESHOLD", "WEIGHTS"]

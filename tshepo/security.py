@@ -106,6 +106,7 @@ def validate_records(records: Any) -> list[dict[str, Any]]:
                 "sender": sender,
                 "body": body,
                 "received_at": r.get("received_at"),
+                "origin": r.get("origin", "received"),
                 "label": r.get("label"),
             }
         )

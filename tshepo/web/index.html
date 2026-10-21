@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tshepo - credit passport</title>
+<link rel="stylesheet" href="/portal.css">
+</head>
+<body>
+<header>
+  <h1>Tshepo</h1>
+  <p class="tagline">A credit passport from the money alerts already on your phone.</p>
+</header>
+
+<main>
+  <section id="step-consent" class="step">
+    <h2>1. What we collect, and why</h2>
+    <p class="muted">Read this before you send anything. You can stop at any time and
+      delete everything we hold.</p>
+    <div id="notice" class="notice">Loading the notice&hellip;</div>
+    <label class="check">
+      <input type="checkbox" id="agree">
+      <span>I have read the notice and I agree to send my text messages.</span>
+    </label>
+    <button id="btn-consent" disabled>Record my consent</button>
+    <p id="consent-status" class="muted"></p>
+  </section>
+
+  <section id="step-send" class="step" hidden>
+    <h2>2. Send your messages</h2>
+    <ol class="howto">
+      <li>Open <strong>Messages</strong> on your phone.</li>
+      <li>Choose <strong>Export messages</strong> (Google Messages), or
+        <strong>Settings &rarr; Export</strong> (Samsung Messages).</li>
+      <li>Choose the file below. It never leaves your phone except to this page.</li>
+    </ol>
+    <input type="file" id="file" accept=".txt,.xml,.json,.csv,.tsv,text/plain,application/json,text/csv">
+    <button id="btn-send" disabled>Send</button>
+    <p id="send-status" class="muted"></p>
+  </section>
+
+  <section id="step-score" class="step" hidden>
+    <h2>3. Your credit passport</h2>
+    <button id="btn-score">Build my passport</button>
+    <div id="passport"></div>
+  </section>
+
+  <section id="step-delete" class="step" hidden>
+    <h2>Delete everything we hold</h2>
+    <p class="muted">This removes your messages and your passport. The record that you
+      gave consent and then withdrew it is kept, because it contains no message
+      content.</p>
+    <button id="btn-delete" class="danger">Delete my data</button>
+    <p id="delete-status" class="muted"></p>
+  </section>
+</main>
+
+<footer>
+  <p class="muted">Your code: <code id="user-code"></code> &mdash; keep it. It is how you
+    come back to your passport and how you delete your data.</p>
+</footer>
+
+<script src="/portal.js"></script>
+</body>
+</html>
